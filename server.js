@@ -51,21 +51,19 @@ const tokenContract = new ethers.Contract(
 app.get("/", (req, res) => {
   res.json({
     success: true,
-    message: "Backend running successfully"
+    message: "Syntrix Multi-Phase Backend Operational"
   });
 });
 
-// ================= CLAIM API =================
+// ================= PHASE 1: SURVEY INGESTION SYSTEM =================
 
 app.post("/api/claim-airdrop", async (req, res) => {
 
   try {
-
     const {
       email,
-      walletAddress,
       monthlySpend,
-      locationType, // Frontend key mapping to database column 'city_tier'
+      locationType,
       ageGroup,
       userPersona,
       luxuryAllocation,
@@ -93,23 +91,13 @@ app.post("/api/claim-airdrop", async (req, res) => {
     } = req.body;
 
     // ================= VALIDATION =================
-
-    if (!email || !walletAddress) {
+    if (!email) {
       return res.status(400).json({
-        error: "Email and wallet required"
-      });
-    }
-
-    // ================= WALLET CHECK =================
-
-    if (!ethers.isAddress(walletAddress)) {
-      return res.status(400).json({
-        error: "Invalid wallet address"
+        error: "Email identifier required"
       });
     }
 
     // ================= EMAIL EXIST CHECK =================
-
     const { data: existingEmail } = await supabase
       .from("syntrix_claims")
       .select("id")
@@ -118,53 +106,18 @@ app.post("/api/claim-airdrop", async (req, res) => {
 
     if (existingEmail) {
       return res.status(400).json({
-        error: "Email already claimed"
+        error: "This email has already submitted the survey."
       });
     }
 
-    // ================= WALLET EXIST CHECK =================
-
-    const { data: existingWallet } = await supabase
-      .from("syntrix_claims")
-      .select("id")
-      .eq("wallet_address", walletAddress)
-      .maybeSingle();
-
-    if (existingWallet) {
-      return res.status(400).json({
-        error: "Wallet already claimed"
-      });
-    }
-
-    // ================= TOKEN AMOUNT =================
-
-    const decimals = await tokenContract.decimals();
-
-    const amount = ethers.parseUnits(
-      "10",
-      decimals
-    );
-
-    // ================= SEND TOKENS =================
-
-    const tx = await tokenContract.transfer(
-      walletAddress,
-      amount
-    );
-
-    await tx.wait();
-
-    // ================= SAVE DATA: STEP 1 (CORE USER CLAIM PROFILE) =================
-
+    // ================= SAVE DATA: STEP 1 (CORE RECORD) =================
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([
         {
           email: email.toLowerCase(),
-          wallet_address: walletAddress,
           amount_rewarded: 10,
-          tx_hash: tx.hash,
-          status: "success"
+          status: "pending" // Set status to pending. Wallet and Tx will remain empty for now.
         }
       ])
       .select("id")
@@ -172,15 +125,13 @@ app.post("/api/claim-airdrop", async (req, res) => {
 
     if (claimError) {
       return res.status(500).json({
-        error: "Claims Registry Failure: " + claimError.message
+        error: "User Claims Registry Failure: " + claimError.message
       });
     }
 
-    // Extract the auto-generated numeric bigint ID from the newly inserted user row
     const insertedClaimId = claimData.id;
 
-    // ================= SAVE DATA: STEP 2 (SPECIFIC CONSUMER ANSWERS) =================
-
+    // ================= SAVE DATA: STEP 2 (SURVEY METRICS) =================
     const { error: surveyError } = await supabase
       .from("syntrix_survey_answers")
       .insert([
@@ -217,11 +168,105 @@ app.post("/api/claim-airdrop", async (req, res) => {
 
     if (surveyError) {
       return res.status(500).json({
-        error: "Survey Storage Metrics Failure: " + surveyError.message
+        error: "Survey Analytics Storage Failure: " + surveyError.message
       });
     }
 
-    // ================= SUCCESS =================
+    return res.json({
+      success: true,
+      message: "Survey data successfully stored. Eligible to claim rewards via dashboard."
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      error: err.message || "Internal server error"
+    });
+  }
+});
+
+// ================= PHASE 2: DASHBOARD USER AUTHENTICATION =================
+
+app.post("/api/dashboard-auth", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: "Email parameter required" });
+
+  try {
+    const { data: userProfile, error } = await supabase
+      .from("syntrix_claims")
+      .select("email, status, wallet_address, tx_hash")
+      .eq("email", email.toLowerCase())
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!userProfile) {
+      return res.status(404).json({ error: "No survey profile found for this email address." });
+    }
+
+    return res.json({
+      success: true,
+      user: userProfile
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Dashboard authentication processing failure" });
+  }
+});
+
+// ================= PHASE 2: LAZY WALLET REWARD DISPENSER =================
+
+app.post("/api/claim-reward", async (req, res) => {
+  const { email, walletAddress } = req.body;
+
+  if (!email || !walletAddress) {
+    return res.status(400).json({ error: "Email and destination wallet address are required." });
+  }
+
+  if (!ethers.isAddress(walletAddress)) {
+    return res.status(400).json({ error: "Invalid target wallet address string alignment." });
+  }
+
+  try {
+    // 1. Verify user profile exists and is still pending
+    const { data: userRecord } = await supabase
+      .from("syntrix_claims")
+      .select("id, status")
+      .eq("email", email.toLowerCase())
+      .maybeSingle();
+
+    if (!userRecord) return res.status(404).json({ error: "User survey verification profile not found." });
+    if (userRecord.status === "success") {
+      return res.status(400).json({ error: "Rewards have already been successfully distributed to this email." });
+    }
+
+    // 2. Prevent a single wallet from claiming rewards multiple times
+    const { data: duplicateWallet } = await supabase
+      .from("syntrix_claims")
+      .select("id")
+      .eq("wallet_address", walletAddress)
+      .maybeSingle();
+
+    if (duplicateWallet) {
+      return res.status(400).json({ error: "This wallet address has already been used to claim a reward." });
+    }
+
+    // 3. Execute Blockchain Token Transfer Asset Execution
+    const decimals = await tokenContract.decimals();
+    const amount = ethers.parseUnits("10", decimals);
+
+    const tx = await tokenContract.transfer(walletAddress, amount);
+    await tx.wait();
+
+    // 4. Update the primary registry row to close the loop
+    const { error: updateError } = await supabase
+      .from("syntrix_claims")
+      .update({
+        wallet_address: walletAddress,
+        tx_hash: tx.hash,
+        status: "success"
+      })
+      .eq("id", userRecord.id);
+
+    if (updateError) return res.status(500).json({ error: "Registry Finalization Failure: " + updateError.message });
 
     return res.json({
       success: true,
@@ -229,15 +274,9 @@ app.post("/api/claim-airdrop", async (req, res) => {
     });
 
   } catch (err) {
-
     console.error(err);
-
-    return res.status(500).json({
-      error: err.message || "Internal server error"
-    });
-
+    return res.status(500).json({ error: err.message || "Smart contract claim execution pipeline blocked." });
   }
-
 });
 
 // ================= SERVER =================
@@ -245,9 +284,5 @@ app.post("/api/claim-airdrop", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-
-  console.log(
-    `Server running on port ${PORT}`
-  );
-
+  console.log(`Server running on port ${PORT}`);
 });
