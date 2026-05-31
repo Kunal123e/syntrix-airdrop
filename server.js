@@ -64,7 +64,32 @@ app.post("/api/claim-airdrop", async (req, res) => {
     const {
       email,
       walletAddress,
-      ...surveyData
+      monthlySpend,
+      locationType, // Frontend key mapping to database column 'city_tier'
+      ageGroup,
+      userPersona,
+      luxuryAllocation,
+      purchaseBlocker,
+      shippingCostTolerance,
+      paymentPreference,
+      returnPolicyImportance,
+      discoveryChannel,
+      trustAnchor,
+      brandRiskTolerance,
+      shoppingDevice,
+      conversionTrigger,
+      decisionTimeline,
+      giftingBehavior,
+      priceComparisonBehavior,
+      peakShoppingTime,
+      painPoint,
+      bestPoint,
+      complementPoint,
+      referralVoice,
+      shoppingCategories,
+      categorySpendCeiling,
+      postPurchaseAction,
+      returnHistoryReason
     } = req.body;
 
     // ================= VALIDATION =================
@@ -86,9 +111,9 @@ app.post("/api/claim-airdrop", async (req, res) => {
     // ================= EMAIL EXIST CHECK =================
 
     const { data: existingEmail } = await supabase
-      .from("claims")
+      .from("syntrix_claims")
       .select("id")
-      .eq("email", email)
+      .eq("email", email.toLowerCase())
       .maybeSingle();
 
     if (existingEmail) {
@@ -100,7 +125,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
     // ================= WALLET EXIST CHECK =================
 
     const { data: existingWallet } = await supabase
-      .from("claims")
+      .from("syntrix_claims")
       .select("id")
       .eq("wallet_address", walletAddress)
       .maybeSingle();
@@ -129,24 +154,70 @@ app.post("/api/claim-airdrop", async (req, res) => {
 
     await tx.wait();
 
-    // ================= SAVE DATABASE =================
+    // ================= SAVE DATA: STEP 1 (CORE USER CLAIM PROFILE) =================
 
-    const { error } = await supabase
-      .from("claims")
+    const { data: claimData, error: claimError } = await supabase
+      .from("syntrix_claims")
       .insert([
         {
           email: email.toLowerCase(),
           wallet_address: walletAddress,
           amount_rewarded: 10,
           tx_hash: tx.hash,
-          status: "success",
-          survey_data: surveyData
+          status: "success"
+        }
+      ])
+      .select("id")
+      .single();
+
+    if (claimError) {
+      return res.status(500).json({
+        error: "Claims Registry Failure: " + claimError.message
+      });
+    }
+
+    // Extract the auto-generated numeric bigint ID from the newly inserted user row
+    const insertedClaimId = claimData.id;
+
+    // ================= SAVE DATA: STEP 2 (SPECIFIC CONSUMER ANSWERS) =================
+
+    const { error: surveyError } = await supabase
+      .from("syntrix_survey_answers")
+      .insert([
+        {
+          claim_id: insertedClaimId,
+          monthly_spend: monthlySpend,
+          city_tier: locationType,
+          age_group: ageGroup,
+          user_persona: userPersona,
+          luxury_allocation: luxuryAllocation,
+          purchase_blocker: purchaseBlocker,
+          shipping_cost_tolerance: shippingCostTolerance,
+          payment_preference: paymentPreference,
+          return_policy_importance: returnPolicyImportance,
+          discovery_channel: discoveryChannel,
+          trust_anchor: trustAnchor,
+          brand_risk_tolerance: brandRiskTolerance,
+          shopping_device: shoppingDevice,
+          conversion_trigger: conversionTrigger,
+          decision_timeline: decisionTimeline,
+          gifting_behavior: giftingBehavior,
+          price_comparison_behavior: priceComparisonBehavior,
+          peak_shopping_time: peakShoppingTime,
+          pain_point: painPoint,
+          best_point: bestPoint,
+          complement_point: complementPoint,
+          referral_voice: referralVoice,
+          shopping_categories: shoppingCategories,
+          category_spend_ceiling: categorySpendCeiling,
+          post_purchase_action: postPurchaseAction,
+          return_history_reason: returnHistoryReason
         }
       ]);
 
-    if (error) {
+    if (surveyError) {
       return res.status(500).json({
-        error: error.message
+        error: "Survey Storage Metrics Failure: " + surveyError.message
       });
     }
 
