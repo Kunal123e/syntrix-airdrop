@@ -124,6 +124,12 @@ app.post("/api/claim-airdrop", async (req, res) => {
       .single();
 
     if (claimError) {
+      // Catch Postgres unique constraint violation gracefully
+      if (claimError.code === "23505") {
+        return res.status(400).json({
+          error: "This email has already submitted the survey."
+        });
+      }
       return res.status(500).json({
         error: "User Claims Registry Failure: " + claimError.message
       });
