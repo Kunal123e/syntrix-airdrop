@@ -58,7 +58,6 @@ app.get("/", (req, res) => {
 // ================= PHASE 1: SURVEY INGESTION SYSTEM =================
 
 app.post("/api/claim-airdrop", async (req, res) => {
-
   try {
     const {
       email,
@@ -97,11 +96,13 @@ app.post("/api/claim-airdrop", async (req, res) => {
       });
     }
 
+    const sanitizedEmail = email.trim().toLowerCase();
+
     // ================= EMAIL EXIST CHECK =================
     const { data: existingEmail } = await supabase
       .from("syntrix_claims")
       .select("id")
-      .eq("email", email.toLowerCase())
+      .eq("email", sanitizedEmail)
       .maybeSingle();
 
     if (existingEmail) {
@@ -115,7 +116,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
       .from("syntrix_claims")
       .insert([
         {
-          email: email.toLowerCase(),
+          email: sanitizedEmail,
           amount_rewarded: 10,
           status: "pending" // Set status to pending. Wallet and Tx will remain empty for now.
         }
@@ -191,29 +192,46 @@ app.post("/api/claim-airdrop", async (req, res) => {
   }
 });
 
-// ================= PHASE 2: DASHBOARD USER AUTHENTICATION =================
-
-app.post("/api/dashboard-auth", async (req, res) => {
-  const { email } = req.body;
+// ================= PHASE 2: AUTOMATED LEDGER AUTO-RECOVERY ROUTE =================
+// FIX: Converted from .post to .get to perfectly match frontend fetch tracking calls.
+// FIX: Changed payload output structures to cleanly return straight flags to script.js.
+app.get("/api/dashboard-auth", async (req, res) => {
+  const { email } = req.query;
   if (!email) return res.status(400).json({ error: "Email parameter required" });
 
   try {
+    const sanitizedEmail = email.trim().toLowerCase();
+
     const { data: userProfile, error } = await supabase
       .from("syntrix_claims")
       .select("email, status, wallet_address, tx_hash")
-      .eq("email", email.toLowerCase())
+      .eq("email", sanitizedEmail)
       .maybeSingle();
 
     if (error) return res.status(500).json({ error: error.message });
+
+    // CASE C: If user record does not exist in database, report safely back
     if (!userProfile) {
-      return res.status(404).json({ error: "No survey profile found for this email address." });
+      return res.json({ 
+        exists: false,
+        isClaimed: false
+      });
     }
 
+    // Evaluate normalized claim status definitions based on table constraints
+    const isClaimed = userProfile.status === "success" || !!(userProfile.tx_hash || userProfile.wallet_address);
+
+    // Provide raw mapped objects back to frontend
     return res.json({
-      success: true,
-      user: userProfile
+      exists: true,
+      isClaimed: isClaimed,
+      status: userProfile.status,
+      txHash: userProfile.tx_hash || null,
+      walletAddress: userProfile.wallet_address || null
     });
+
   } catch (err) {
+    console.error("Dashboard auth endpoint processing failure:", err);
     return res.status(500).json({ error: "Dashboard authentication processing failure" });
   }
 });
@@ -232,15 +250,18 @@ app.post("/api/claim-reward", async (req, res) => {
   }
 
   try {
+    const sanitizedEmail = email.trim().toLowerCase();
+
     // 1. Verify user profile exists and is still pending
     const { data: userRecord } = await supabase
       .from("syntrix_claims")
-      .select("id, status")
-      .eq("email", email.toLowerCase())
+      .select("id, status, tx_hash")
+      .eq("email", sanitizedEmail)
       .maybeSingle();
 
     if (!userRecord) return res.status(404).json({ error: "User survey verification profile not found." });
-    if (userRecord.status === "success") {
+    
+    if (userRecord.status === "success" || userRecord.tx_hash) {
       return res.status(400).json({ error: "Rewards have already been successfully distributed to this email." });
     }
 
