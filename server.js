@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const { createClient } = require("@supabase/supabase-js");
 const { ethers } = require("ethers");
+const nodemailer = require("nodemailer"); // Added for referral invitation distribution
 
 const app = express();
 
@@ -46,6 +47,16 @@ const tokenContract = new ethers.Contract(
   wallet
 );
 
+// ================= NODEMAILER SMTP TRANSPORTER SETUP =================
+
+const mailTransporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.GMAIL_USER_ACCOUNT, // Add your Gmail address to your Render .env settings
+    pass: process.env.GMAIL_APP_PASSWORD  // Add your Google App Password to your Render .env settings
+  }
+});
+
 // ================= TEST ROUTE =================
 
 app.get("/", (req, res) => {
@@ -61,6 +72,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
   try {
     const {
       email,
+      referredByCode, // Added: Extracted from frontend registration tracking states
       monthlySpend,
       locationType,
       ageGroup,
@@ -118,14 +130,13 @@ app.post("/api/claim-airdrop", async (req, res) => {
         {
           email: sanitizedEmail,
           amount_rewarded: 10,
-          status: "pending" // Set status to pending. Wallet and Tx will remain empty for now.
+          status: "pending" 
         }
       ])
-      .select("id")
+      .select("id, referral_code")
       .single();
 
     if (claimError) {
-      // Catch Postgres unique constraint violation gracefully
       if (claimError.code === "23505") {
         return res.status(400).json({
           error: "This email has already submitted the survey."
@@ -137,6 +148,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
     }
 
     const insertedClaimId = claimData.id;
+    const generatedReferralCode = claimData.referral_code;
 
     // ================= SAVE DATA: STEP 2 (SURVEY METRICS) =================
     const { error: surveyError } = await supabase
@@ -179,8 +191,30 @@ app.post("/api/claim-airdrop", async (req, res) => {
       });
     }
 
+    // ================= NEW: MAP INBOUND LOG TRACKING ON SUBMISSION FINALIZE =================
+    if (referredByCode) {
+      const { data: referrerRecord } = await supabase
+        .from("syntrix_claims")
+        .select("email")
+        .eq("referral_code", referredByCode)
+        .maybeSingle();
+
+      if (referrerRecord && referrerRecord.email !== sanitizedEmail) {
+        await supabase
+          .from("syntrix_referral_logs")
+          .insert([
+            {
+              referrer_email: referrerRecord.email,
+              referred_friend_email: sanitizedEmail,
+              status: "pending"
+            }
+          ]);
+      }
+    }
+
     return res.json({
       success: true,
+      referralCode: generatedReferralCode, // Handed back down to frontend context state memory
       message: "Survey data successfully stored. Eligible to claim rewards via dashboard."
     });
 
@@ -193,10 +227,9 @@ app.post("/api/claim-airdrop", async (req, res) => {
 });
 
 // ================= PHASE 2: AUTOMATED LEDGER AUTO-RECOVERY ROUTE =================
-// FIX: Converted from .post to .get to perfectly match frontend fetch tracking calls.
-// FIX: Changed payload output structures to cleanly return straight flags to script.js.
+
 app.get("/api/dashboard-auth", async (req, res) => {
-  const { email } = req.query;
+  const { email, ref } = req.query; // Added: ref param pulled from incoming URLs
   if (!email) return res.status(400).json({ error: "Email parameter required" });
 
   try {
@@ -204,7 +237,7 @@ app.get("/api/dashboard-auth", async (req, res) => {
 
     const { data: userProfile, error } = await supabase
       .from("syntrix_claims")
-      .select("email, status, wallet_address, tx_hash")
+      .select("email, status, wallet_address, tx_hash, referral_code")
       .eq("email", sanitizedEmail)
       .maybeSingle();
 
@@ -212,6 +245,28 @@ app.get("/api/dashboard-auth", async (req, res) => {
 
     // CASE C: If user record does not exist in database, report safely back
     if (!userProfile) {
+      // If a brand new email logs in via a ref parameter link, log it right now
+      if (ref) {
+        const { data: potentialReferrer } = await supabase
+          .from("syntrix_claims")
+          .select("email")
+          .eq("referral_code", ref)
+          .maybeSingle();
+
+        if (potentialReferrer && potentialReferrer.email !== sanitizedEmail) {
+          // Pre-log the connection interaction safely before submission
+          await supabase
+            .from("syntrix_referral_logs")
+            .insert([
+              {
+                referrer_email: potentialReferrer.email,
+                referred_friend_email: sanitizedEmail,
+                status: "pending"
+              }
+            ]).v2; // .v2 bypasses table failures if duplicated early
+        }
+      }
+
       return res.json({ 
         exists: false,
         isClaimed: false
@@ -227,12 +282,67 @@ app.get("/api/dashboard-auth", async (req, res) => {
       isClaimed: isClaimed,
       status: userProfile.status,
       txHash: userProfile.tx_hash || null,
-      walletAddress: userProfile.wallet_address || null
+      walletAddress: userProfile.wallet_address || null,
+      referralCode: userProfile.referral_code || null // Added to auto-fill frontend parameters on login recovery paths
     });
 
   } catch (err) {
     console.error("Dashboard auth endpoint processing failure:", err);
     return res.status(500).json({ error: "Dashboard authentication processing failure" });
+  }
+});
+
+// ================= NEW: DIRECT OUTBOUND EMAIL INVITATION ROUTE =================
+
+app.post("/api/send-invite", async (req, res) => {
+  const { referrerEmail, friendEmail, referralLink } = req.body;
+
+  if (!referrerEmail || !friendEmail || !referralLink) {
+    return res.status(400).json({ success: false, error: "Missing required invitation properties parameters." });
+  }
+
+  try {
+    const sanitizedFriendEmail = friendEmail.trim().toLowerCase();
+
+    // 1. Verify if friend is already recorded inside user profiles
+    const { data: existingUser } = await supabase
+      .from("syntrix_claims")
+      .select("id")
+      .eq("email", sanitizedFriendEmail)
+      .maybeSingle();
+
+    if (existingUser) {
+      return res.status(400).json({ success: false, error: "This friend is already registered inside our active platform network." });
+    }
+
+    // 2. Format HTML email body data components
+    const mailConfigurations = {
+      from: `"Syntrix Settlement Network" <${process.env.GMAIL_USER_ACCOUNT}>`,
+      to: sanitizedFriendEmail,
+      subject: '✨ Syntrix Consumer Research Token Allocation Invitation',
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 25px; color: #111111; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 16px;">
+          <h2 style="color: #0f172a; margin-top: 0;">You've Been Allocated an Airdrop Entry Slot!</h2>
+          <p>A verification profile registered under <strong>${referrerEmail}</strong> has passed an invitation allocation directly to you.</p>
+          <p>Complete our strategic consumer analytics metrics module matrix to access your 10 SYNX network token allotment destination.</p>
+          <br>
+          <a href="${referralLink}" style="background: #0f172a; color: #ffffff; padding: 14px 28px; text-decoration: none; font-weight: bold; border-radius: 8px; display: inline-block;">
+            Initialize Modules & Claim Balance &rarr;
+          </a>
+          <br><br>
+          <hr style="border: none; border-top: 1px solid #e2e8f0;">
+          <small style="color: #64748b;">This data entry loop is secured. Ensure registration processing finishes through the direct access tracking link mapped above.</small>
+        </div>
+      `
+    };
+
+    // 3. Fire out mail transit call execution
+    await mailTransporter.sendMail(mailConfigurations);
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error("Outbound notification transit error log context:", err);
+    return res.status(500).json({ success: false, error: "Systemic execution timeout on transactional email servers." });
   }
 });
 
@@ -294,6 +404,12 @@ app.post("/api/claim-reward", async (req, res) => {
       .eq("id", userRecord.id);
 
     if (updateError) return res.status(500).json({ error: "Registry Finalization Failure: " + updateError.message });
+
+    // 5. Update referral logs status cleanly if they were brought in via reference pipelines
+    await supabase
+      .from("syntrix_referral_logs")
+      .update({ status: "completed" })
+      .eq("referred_friend_email", sanitizedEmail);
 
     return res.json({
       success: true,
