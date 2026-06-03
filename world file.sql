@@ -1,64 +1,84 @@
--- =========================================================================
--- TABLE 1: Core User Identity & Authentication Registry
--- =========================================================================
-CREATE TABLE IF NOT EXISTS public.syntrix_claims (
+-- ========================================================
+-- Syntrix Referral System Database Schema (Claims v2)
+-- ========================================================
+
+-- 1. Create or ensure existing claims table
+CREATE TABLE IF NOT EXISTS claims (
     id BIGSERIAL PRIMARY KEY,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     email TEXT UNIQUE NOT NULL,
-    wallet_address VARCHAR(42) UNIQUE NOT NULL,
+    wallet_address TEXT UNIQUE, -- Allow nullable initially until claimed (retained as unique)
     amount_rewarded NUMERIC DEFAULT 10,
     tx_hash TEXT,
-    status TEXT DEFAULT 'success'
+    status TEXT DEFAULT 'pending', -- Default to 'pending' to allow claims flow
+    survey_data JSONB
 );
 
--- =========================================================================
--- TABLE 2: Deep Granular Consumer Analytics & Sentiment Survey Answers
--- =========================================================================
-CREATE TABLE IF NOT EXISTS public.syntrix_survey_answers (
-    -- Unique internal tracer row ID for the answers sheet
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
+-- 2. Add referral_code column to claims table (Phase 2)
+ALTER TABLE claims \
+ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
+
+-- Create index on referral_code for fast verification queries
+CREATE INDEX IF NOT EXISTS idx_claims_referral_code 
+ON claims(referral_code);
+
+
+-- 3. Create syntrix_referrals table to track referred relationships (Phase 1)
+CREATE TABLE IF NOT EXISTS syntrix_referrals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    referrer_email TEXT NOT NULL,
+    referred_email TEXT NOT NULL UNIQUE, -- Constraint: referred_email must be UNIQUE (Phase 11)
+    referral_code TEXT NOT NULL,
+    reward_amount NUMERIC DEFAULT 10 NOT NULL,
+    status TEXT DEFAULT 'pending' NOT NULL 
+        CHECK (status IN ('pending', 'approved', 'claimed', 'rejected')),
+    claim_token TEXT UNIQUE, -- Links directly to syntrix_rewards
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     
-    -- Foreign Key Link: Linked to the BIGSERIAL primary key from the user registry
-    claim_id BIGINT REFERENCES public.syntrix_claims(id) ON DELETE CASCADE NOT NULL,
-    
-    -- Section 1: Financial Power & Demographics
-    monthly_spend TEXT,
-    city_tier TEXT,
-    age_group TEXT,
-    user_persona TEXT,
-    luxury_allocation TEXT,
-    
-    -- Section 2: Checkout Friction & Drop-Off Killers
-    purchase_blocker TEXT,
-    shipping_cost_tolerance TEXT,
-    payment_preference TEXT,
-    return_policy_importance TEXT,
-    
-    -- Section 3: Discovery Engines & Trust Anchors
-    discovery_channel TEXT,
-    trust_anchor TEXT,
-    brand_risk_tolerance TEXT,
-    shopping_device TEXT,
-    
-    -- Section 4: Buying Psychology & Timelines
-    conversion_trigger TEXT,
-    decision_timeline TEXT,
-    gifting_behavior TEXT,
-    price_comparison_behavior TEXT,
-    peak_shopping_time TEXT,
-    
-    -- Section 5: High-Fidelity Sentiment (Written Responses)
-    pain_point TEXT,
-    best_point TEXT,
-    complement_point TEXT,
-    referral_voice TEXT,
-    
-    -- Section 6: Niche Vertical - Shopping Categories
-    shopping_categories JSONB, -- Clean multi-select checkbox array storage
-    category_spend_ceiling TEXT,
-    
-    -- Section 7: Post-Purchase Behavior
-    post_purchase_action TEXT,
-    return_history_reason TEXT    
+    -- Security: Prevent self-referral (Phase 11)
+    CONSTRAINT chk_no_self_referral CHECK (referrer_email <> referred_email)
 );
+
+-- Indexing for dashboard statistics & verification queries
+CREATE INDEX IF NOT EXISTS idx_syntrix_referrals_referrer_email 
+ON syntrix_referrals(referrer_email);
+
+CREATE INDEX IF NOT EXISTS idx_syntrix_referrals_referred_email 
+ON syntrix_referrals(referred_email);
+
+
+-- 4. Create syntrix_rewards table to track claimable tokens (Phase 1)
+CREATE TABLE IF NOT EXISTS syntrix_rewards (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT NOT NULL,
+    reward_type TEXT NOT NULL 
+        CHECK (reward_type IN ('survey', 'referral', 'bonus')),
+    amount NUMERIC NOT NULL,
+    status TEXT DEFAULT 'pending' NOT NULL 
+        CHECK (status IN ('pending', 'claimed', 'rejected')),
+    claim_token TEXT UNIQUE NOT NULL, -- Constraint: claim_token becomes invalid after claim (Phase 11)
+    tx_hash TEXT UNIQUE, -- Stores blockchain transaction hash
+    claimed_wallet TEXT, -- Wallet address that received the tokens
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    claimed_at TIMESTAMPTZ
+);
+
+-- Indexing for reward lookup & status tracking
+CREATE INDEX IF NOT EXISTS idx_syntrix_rewards_email 
+ON syntrix_rewards(email);
+
+CREATE INDEX IF NOT EXISTS idx_syntrix_rewards_claim_token 
+ON syntrix_rewards(claim_token);
+
+
+-- 5. Create syntrix_wallets mapping table (Wallet Protection - Phase 10)
+-- Rules: One wallet = One email, One email = One wallet
+CREATE TABLE IF NOT EXISTS syntrix_wallets (
+    email TEXT PRIMARY KEY, -- Enforces only one wallet per email
+    wallet_address TEXT UNIQUE NOT NULL, -- Enforces only one email per wallet
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+
+-- Indexing wallet address for quick lookup during claims
+CREATE INDEX IF NOT EXISTS idx_syntrix_wallets_address 
+ON syntrix_wallets(wallet_address);
