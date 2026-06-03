@@ -2,8 +2,8 @@
 -- Syntrix Referral System Database Schema (Claims v2)
 -- ========================================================
 
--- 1. Create or ensure existing claims table
-CREATE TABLE IF NOT EXISTS claims (
+-- 1. Create or ensure existing syntrix_claims table
+CREATE TABLE IF NOT EXISTS syntrix_claims (
     id BIGSERIAL PRIMARY KEY,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     email TEXT UNIQUE NOT NULL,
@@ -14,13 +14,13 @@ CREATE TABLE IF NOT EXISTS claims (
     survey_data JSONB
 );
 
--- 2. Add referral_code column to claims table (Phase 2)
-ALTER TABLE claims \
+-- 2. Add referral_code column to syntrix_claims table (Phase 2)
+ALTER TABLE syntrix_claims 
 ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
 
 -- Create index on referral_code for fast verification queries
-CREATE INDEX IF NOT EXISTS idx_claims_referral_code 
-ON claims(referral_code);
+CREATE INDEX IF NOT EXISTS idx_syntrix_claims_referral_code 
+ON syntrix_claims(referral_code);
 
 
 -- 3. Create syntrix_referrals table to track referred relationships (Phase 1)
