@@ -144,7 +144,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
 
     // ================= EMAIL EXIST CHECK =================
     const { data: existingEmail } = await supabase
-      .from("claims")
+      .from("syntrix_claims")
       .select("id")
       .eq("email", sanitizedEmail)
       .maybeSingle();
@@ -167,7 +167,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
 
       // Rule 1 & 2: Check if code exists and belongs to another user
       const { data: referrerClaim, error: refError } = await supabase
-        .from("claims")
+        .from("syntrix_claims")
         .select("email")
         .eq("referral_code", cleanRefCode)
         .maybeSingle();
@@ -198,7 +198,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
 
     // ================= SAVE DATA: SINGLE INSERT (CORE + SURVEY JSONB) =================
     const { data: claimData, error: claimError } = await supabase
-      .from("claims")
+      .from("syntrix_claims")
       .insert([
         {
           email: sanitizedEmail,
@@ -208,8 +208,17 @@ app.post("/api/claim-airdrop", async (req, res) => {
           survey_data: surveyData // Store survey inside single JSONB column
         }
       ])
-      .select("id")
+      .select("id, email, status, wallet_address")
       .single();
+
+    if (!claimError && claimData) {
+      console.log("[Survey Submission] Created claim row details:", {
+        id: claimData.id,
+        email: claimData.email,
+        status: claimData.status,
+        wallet_address: claimData.wallet_address
+      });
+    }
 
     if (claimError) {
       if (claimError.code === "23505") {
@@ -294,7 +303,7 @@ app.get("/api/dashboard-auth", async (req, res) => {
     const sanitizedEmail = email.trim().toLowerCase();
 
     const { data: userProfile, error } = await supabase
-      .from("claims")
+      .from("syntrix_claims")
       .select("email, status, wallet_address, tx_hash, referral_code")
       .eq("email", sanitizedEmail)
       .maybeSingle();
@@ -306,7 +315,7 @@ app.get("/api/dashboard-auth", async (req, res) => {
       if (ref) {
         try {
           const { data: potentialReferrer } = await supabase
-            .from("claims")
+            .from("syntrix_claims")
             .select("email")
             .eq("referral_code", ref.trim().toUpperCase())
             .maybeSingle();
@@ -361,7 +370,7 @@ app.get("/api/referral/dashboard", async (req, res) => {
 
     // 1. Get user referral code
     const { data: userClaim, error: claimError } = await supabase
-      .from("claims")
+      .from("syntrix_claims")
       .select("referral_code")
       .eq("email", sanitizedEmail)
       .maybeSingle();
@@ -419,7 +428,7 @@ app.get("/api/referral/dashboard", async (req, res) => {
   }
 });
 
-// ================= DIRECT EMAIL INVITATIONS =================
+// ================= DIRECT EMAIL INVITATIONS (EXISTING) =================
 
 app.post("/api/send-invite", async (req, res) => {
   const { referrerEmail, friendEmail, referralLink } = req.body;
@@ -433,7 +442,7 @@ app.post("/api/send-invite", async (req, res) => {
 
     // Verify if friend is already recorded
     const { data: existingUser } = await supabase
-      .from("claims")
+      .from("syntrix_claims")
       .select("id")
       .eq("email", sanitizedFriendEmail)
       .maybeSingle();
@@ -663,11 +672,15 @@ app.post("/api/claim-reward", async (req, res) => {
     const sanitizedWallet = walletAddress.trim().toLowerCase();
 
     // 1. Verify user profile exists and is still pending
-    const { data: userRecord } = await supabase
-      .from("claims")
+    console.log(`[Claim Retrieval] Attempting lookup. Email received: "${sanitizedEmail}". Query table: "syntrix_claims"`);
+
+    const { data: userRecord, error: fetchError } = await supabase
+      .from("syntrix_claims")
       .select("id, status, tx_hash")
       .eq("email", sanitizedEmail)
       .maybeSingle();
+
+    console.log(`[Claim Retrieval] Query result:`, { userRecord, error: fetchError });
 
     if (!userRecord) return res.status(404).json({ error: "User survey verification profile not found." });
     
@@ -698,9 +711,9 @@ app.post("/api/claim-reward", async (req, res) => {
       return res.status(400).json({ error: `This email is already associated with a different wallet address: ${emailMap.wallet_address}` });
     }
 
-    // 2. Prevent double claim by checking duplicate wallet in claims table
+    // 2. Prevent double claim by checking duplicate wallet in syntrix_claims table
     const { data: duplicateWallet } = await supabase
-      .from("claims")
+      .from("syntrix_claims")
       .select("id")
       .eq("wallet_address", sanitizedWallet)
       .maybeSingle();
@@ -709,7 +722,7 @@ app.post("/api/claim-reward", async (req, res) => {
       return res.status(400).json({ error: "This wallet address has already been used to claim a survey reward." });
     }
 
-    // 3. Execute Blockchain Token Transfer Asset Execution
+    // 3. Execute Blockchain Token Transfer
     let txHash = "0x" + crypto.randomBytes(32).toString("hex");
 
     if (tokenContract) {
@@ -725,7 +738,7 @@ app.post("/api/claim-reward", async (req, res) => {
 
     // 4. Update the primary registry row to close the loop
     const { error: updateError } = await supabase
-      .from("claims")
+      .from("syntrix_claims")
       .update({
         wallet_address: sanitizedWallet,
         tx_hash: txHash,
