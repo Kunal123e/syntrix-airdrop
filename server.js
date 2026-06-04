@@ -45,11 +45,36 @@ if (process.env.RPC_URL && process.env.PRIVATE_KEY && process.env.TOKEN_ADDRESS)
 
 // ================= SMTP EMAIL SETUP =================
 
+const emailUser = process.env.EMAIL_USER || process.env.GMAIL_USER_ACCOUNT;
+const emailPass = process.env.EMAIL_PASS || process.env.GMAIL_APP_PASSWORD;
+
+// STEP 3 – VERIFY ENV VARIABLES & startup logging
+console.log(`SMTP USER FOUND: ${emailUser ? "YES" : "NO"}`);
+console.log(`SMTP PASSWORD FOUND: ${emailPass ? "YES" : "NO"}`);
+
+// STEP 5 – VERIFY GMAIL AUTH formats
+if (emailUser) {
+  if (emailUser.endsWith("@gmail.com") || emailUser.endsWith("@googlemail.com")) {
+    console.log("SMTP USER TYPE: Gmail account verified");
+  } else {
+    console.warn("SMTP USER TYPE: WARNING - USER IS NOT A GMAIL ACCOUNT. SMTP may fail on Gmail service.");
+  }
+}
+
+if (emailPass) {
+  const cleanPass = emailPass.replace(/\s+/g, "");
+  if (cleanPass.length === 16 && /^[a-zA-Z]+$/.test(cleanPass)) {
+    console.log("SMTP PASSWORD TYPE: App Password format valid (16 characters, letters only)");
+  } else {
+    console.warn("SMTP PASSWORD TYPE: WARNING - PASSWORD IS NOT A 16-CHARACTER GMAIL APP PASSWORD. A standard password or incorrect format was provided. Gmail SMTP authentication will fail.");
+  }
+}
+
 const mailTransporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.GMAIL_USER_ACCOUNT,
-    pass: process.env.GMAIL_APP_PASSWORD 
+    user: emailUser,
+    pass: emailPass
   }
 });
 
@@ -74,7 +99,7 @@ async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
   const claimLink = `${frontendUrl}/claim?token=${claimToken}`;
 
   const mailOptions = {
-    from: `"Syntrix Settlement Network" <${process.env.GMAIL_USER_ACCOUNT}>`,
+    from: `"Syntrix Settlement Network" <${emailUser}>`,
     to: referrerEmail,
     subject: "🎁 You Earned 10 SYNTRIX Tokens",
     html: `
@@ -282,7 +307,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
   }
 });
 
-// ================= DASHBOARD-AUTH LEDGER RECOVERY =================
+// ================= DASHBOARD-AUTH LEDGER RECOVERY (MODIFIED) =================
 
 app.get("/api/dashboard-auth", async (req, res) => {
   const { email, ref } = req.query;
@@ -421,15 +446,27 @@ app.get("/api/referral/dashboard", async (req, res) => {
 // ================= DIRECT EMAIL INVITATIONS (EXISTING) =================
 
 app.post("/api/send-invite", async (req, res) => {
+  // STEP 7 – LOG Invite endpoint hit
+  console.log("Invite endpoint hit");
+
   const { referrerEmail, friendEmail, referralLink } = req.body;
 
   if (!referrerEmail || !friendEmail || !referralLink) {
     return res.status(400).json({ success: false, error: "Missing required invitation properties parameters." });
   }
 
-  try {
-    const sanitizedFriendEmail = friendEmail.trim().toLowerCase();
+  // STEP 3 – Confirm EMAIL_USER and EMAIL_PASS exist, return explicit error if missing
+  if (!emailUser || !emailPass) {
+    console.error("SMTP Config Error: EMAIL_USER or EMAIL_PASS missing");
+    return res.status(500).json({ 
+      success: false, 
+      error: "SMTP credentials are not configured on the server. Please check your environment variables." 
+    });
+  }
 
+  const sanitizedFriendEmail = friendEmail.trim().toLowerCase();
+
+  try {
     // Verify if friend is already recorded
     const { data: existingUser } = await supabase
       .from("syntrix_claims")
@@ -441,8 +478,41 @@ app.post("/api/send-invite", async (req, res) => {
       return res.status(400).json({ success: false, error: "This friend is already registered inside our network." });
     }
 
+    // Extract referral code (STEP 8)
+    let referralCode = "UNKNOWN";
+    try {
+      const url = new URL(referralLink);
+      referralCode = url.searchParams.get("ref") || "UNKNOWN";
+    } catch (e) {
+      const match = referralLink.match(/[?&]ref=([^&]+)/);
+      if (match) referralCode = match[1];
+    }
+
+    // STEP 2 – VERIFY BACKEND ROUTE logs
+    console.log("Invite request received");
+    console.log("Recipient email:", sanitizedFriendEmail);
+    console.log("Referral code:", referralCode);
+    console.log("Referral link:", referralLink);
+
+    // Verify SMTP Connection & Authentication explicitly
+    console.log("Verifying SMTP connection...");
+    try {
+      await new Promise((resolve, reject) => {
+        mailTransporter.verify((error, success) => {
+          if (error) reject(error);
+          else resolve(success);
+        });
+      });
+      // STEP 7 – Logs
+      console.log("SMTP connection established");
+      console.log("SMTP authentication successful");
+    } catch (verifyErr) {
+      console.error("SMTP Authentication Verification Failed:", verifyErr);
+      throw new Error(`SMTP authentication failed: ${verifyErr.message}`);
+    }
+
     const mailConfigurations = {
-      from: `"Syntrix Settlement Network" <${process.env.GMAIL_USER_ACCOUNT}>`,
+      from: `"Syntrix Settlement Network" <${emailUser}>`,
       to: sanitizedFriendEmail,
       subject: '✨ Syntrix Consumer Research Token Allocation Invitation',
       html: `
@@ -450,6 +520,9 @@ app.post("/api/send-invite", async (req, res) => {
           <h2 style="color: #0f172a; margin-top: 0;">You've Been Allocated an Airdrop Entry Slot!</h2>
           <p>A verification profile registered under <strong>${referrerEmail}</strong> has passed an invitation allocation directly to you.</p>
           <p>Complete our strategic consumer analytics metrics module matrix to access your 10 SYNX network token allotment destination.</p>
+          <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;">
+          <p><strong>Referral Code:</strong> <code>${referralCode}</code></p>
+          <p><strong>Referral Link:</strong> <a href="${referralLink}">${referralLink}</a></p>
           <br>
           <a href="${referralLink}" style="background: #0f172a; color: #ffffff; padding: 14px 28px; text-decoration: none; font-weight: bold; border-radius: 8px; display: inline-block;">
             Initialize Modules & Claim Balance &rarr;
@@ -461,13 +534,34 @@ app.post("/api/send-invite", async (req, res) => {
       `
     };
 
+    // STEP 4 – VERIFY NODEMAILER Before/After logs
+    console.log("Preparing email");
     await mailTransporter.sendMail(mailConfigurations);
-    return res.json({ success: true });
+    console.log("Email sent");
+    // STEP 7 – Log
+    console.log("Email sent successfully");
+
+    // STEP 6 – RETURN SUCCESS API RESPONSE
+    return res.json({
+      success: true,
+      message: "Invitation email sent"
+    });
 
   } catch (err) {
-    console.error("Outbound notification transit error:", err);
+    // STEP 7 – Log Full SMTP error stack
+    console.error("Outbound notification transit error stack:", err);
     console.log(`[Email Fallback] Failed to send referral invite to ${sanitizedFriendEmail}. You can manually copy the link: ${referralLink}`);
-    return res.status(500).json({ success: false, error: "Systemic execution timeout on transactional email servers." });
+    
+    let userFriendlyError = err.message || "Outbound invitation transit failed.";
+    if (err.code === 'EAUTH' || err.message.includes('Authentication') || err.message.includes('Username and Password not accepted')) {
+      userFriendlyError = "SMTP authentication failed";
+    }
+    
+    // STEP 6 – RETURN FAILURE API RESPONSE
+    return res.status(500).json({
+      success: false,
+      error: userFriendlyError
+    });
   }
 });
 
