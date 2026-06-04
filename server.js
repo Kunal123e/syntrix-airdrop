@@ -92,6 +92,28 @@ function generateReferralCode(email) {
 }
 
 /**
+ * Normalizes user-inputted referral codes to SYN-XXXXXX format
+ */
+function normalizeReferralCode(code) {
+  if (!code) return "";
+  let clean = code.trim().toUpperCase();
+  clean = clean.replace(/\s+/g, "");
+  
+  if (!clean.startsWith("SYN-")) {
+    if (clean.startsWith("SYN")) {
+      clean = "SYN-" + clean.substring(3);
+    } else {
+      clean = "SYN-" + clean;
+    }
+  }
+  
+  if (clean.length > 10) {
+    clean = clean.substring(0, 10);
+  }
+  return clean;
+}
+
+/**
  * Sends a reward claim notification email to the referrer
  */
 async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
@@ -183,7 +205,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
     let isReferralValid = false;
 
     if (referredByCode) {
-      const cleanRefCode = referredByCode.trim().toUpperCase();
+      const cleanRefCode = normalizeReferralCode(referredByCode);
 
       // Rule 3: Self-referral protection (User cannot refer themselves)
       if (cleanRefCode === generatedReferralCode) {
@@ -261,7 +283,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
           {
             referrer_email: referrerRecord.email,
             referred_email: sanitizedEmail,
-            referral_code: referredByCode.trim().toUpperCase(),
+            referral_code: normalizeReferralCode(referredByCode),
             reward_amount: 10,
             status: "pending"
           }
@@ -316,6 +338,43 @@ app.get("/api/dashboard-auth", async (req, res) => {
   try {
     const sanitizedEmail = email.trim().toLowerCase();
 
+    // ================= Live Referral Code Validation on Onboarding =================
+    if (ref) {
+      const cleanRefCode = normalizeReferralCode(ref);
+      const generatedReferralCode = generateReferralCode(sanitizedEmail);
+
+      // Rule 3: Self-referral protection (User cannot refer themselves)
+      if (cleanRefCode === generatedReferralCode) {
+        return res.status(400).json({ error: "You cannot refer yourself." });
+      }
+
+      // Rule 1 & 2: Check if code exists and belongs to another user
+      const { data: referrerClaim, error: refError } = await supabase
+        .from("syntrix_claims")
+        .select("email")
+        .eq("referral_code", cleanRefCode)
+        .maybeSingle();
+
+      if (refError || !referrerClaim) {
+        return res.status(400).json({ error: "Invalid referral code. Code does not exist." });
+      }
+
+      if (referrerClaim.email === sanitizedEmail) {
+        return res.status(400).json({ error: "Self-referral check: Code belongs to this email." });
+      }
+
+      // Rule 4: One referral reward per referred email
+      const { data: alreadyReferred } = await supabase
+        .from("syntrix_referrals")
+        .select("id")
+        .eq("referred_email", sanitizedEmail)
+        .maybeSingle();
+
+      if (alreadyReferred) {
+        return res.status(400).json({ error: "This email has already been referred." });
+      }
+    }
+
     const { data: userProfile, error } = await supabase
       .from("syntrix_claims")
       .select("email, status, wallet_address, tx_hash, referral_code")
@@ -327,11 +386,12 @@ app.get("/api/dashboard-auth", async (req, res) => {
     if (!userProfile) {
       // Legacy referral logs hook
       if (ref) {
+        const cleanRefCode = normalizeReferralCode(ref);
         try {
           const { data: potentialReferrer } = await supabase
             .from("syntrix_claims")
             .select("email")
-            .eq("referral_code", ref.trim().toUpperCase())
+            .eq("referral_code", cleanRefCode)
             .maybeSingle();
 
           if (potentialReferrer && potentialReferrer.email !== sanitizedEmail) {
@@ -369,7 +429,7 @@ app.get("/api/dashboard-auth", async (req, res) => {
 
   } catch (err) {
     console.error("Dashboard auth endpoint processing failure:", err);
-    return res.status(500).json({ error: "Dashboard authentication processing failure" });
+    return res.status(500).json({ error: err.message || "Dashboard authentication processing failure" });
   }
 });
 
