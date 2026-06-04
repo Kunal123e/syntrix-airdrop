@@ -117,6 +117,12 @@ function normalizeReferralCode(code) {
  * Sends a reward claim notification email to the referrer
  */
 async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
+  // Prevent sending invalid claim links
+  if (!claimToken) {
+    console.error("Missing claim token");
+    return false;
+  }
+
   const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
   const claimLink = `${frontendUrl}/claim?token=${claimToken}`;
 
@@ -154,6 +160,7 @@ async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
 
   try {
     await mailTransporter.sendMail(mailOptions);
+    console.log("EMAIL SENT");
     console.log(`Notification email sent to referrer: ${referrerEmail}`);
     return true;
   } catch (error) {
@@ -169,6 +176,89 @@ app.get("/", (req, res) => {
     success: true,
     message: "Syntrix Referral Backend Operating with Phase 1-12 Security Integrations"
   });
+});
+
+// ================= TEST EMAIL ROUTE =================
+app.post("/api/test-email", async (req, res) => {
+  const { toEmail } = req.body;
+  const targetEmail = toEmail || emailUser;
+
+  if (!targetEmail) {
+    return res.status(400).json({ success: false, error: "Recipient email parameter required." });
+  }
+
+  console.log(`[SMTP TEST] Attempting to send test email to: ${targetEmail}`);
+
+  const mailOptions = {
+    from: `"Syntrix SMTP Test" <${emailUser}>`,
+    to: targetEmail,
+    subject: "SMTP TEST",
+    text: "SMTP connection successful."
+  };
+
+  try {
+    const info = await mailTransporter.sendMail(mailOptions);
+    console.log("[SMTP TEST] Success:", info.response);
+    return res.json({
+      success: true,
+      message: "SMTP connection successful.",
+      info: info.response
+    });
+  } catch (err) {
+    console.error("[SMTP TEST] Connection failed:", err);
+    return res.status(500).json({
+      success: false,
+      error: "SMTP connection failed: " + err.message
+    });
+  }
+});
+
+// ================= SEND INVITE ROUTE =================
+app.post("/api/send-invite", async (req, res) => {
+  const { friendEmail, referralCode, referralLink } = req.body;
+
+  if (!friendEmail || !referralCode || !referralLink) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing parameters. friendEmail, referralCode, and referralLink are required."
+    });
+  }
+
+  console.log("INVITE EMAIL REQUESTED");
+
+  const mailOptions = {
+    from: `"Syntrix Network" <${emailUser}>`,
+    to: friendEmail,
+    subject: "🎁 Join Syntrix and earn token rewards!",
+    html: `
+      <div style="font-family: Arial, sans-serif; padding: 25px; color: #1e293b; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 12px;">
+        <h2 style="color: #4f46e5; margin-top: 0;">You've been invited to Syntrix!</h2>
+        <p>A colleague is inviting you to join the Syntrix Consumer Analytics Network.</p>
+        <p>Complete the consumer research survey modules to earn high-utility SYN token rewards.</p>
+        
+        <div style="background-color: #f8fafc; border-left: 4px solid #4f46e5; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0; font-weight: bold;">Referral Code: <span style="color: #4f46e5;">${referralCode}</span></p>
+        </div>
+
+        <p>Click the link below to get started and claim your tokens:</p>
+        <a href="${referralLink}" style="background-color: #4f46e5; color: #ffffff; padding: 12px 24px; text-decoration: none; font-weight: bold; border-radius: 6px; display: inline-block;">
+          Accept Invitation &rarr;
+        </a>
+      </div>
+    `
+  };
+
+  try {
+    await mailTransporter.sendMail(mailOptions);
+    console.log("INVITE EMAIL SENT");
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Invite email delivery failed:", err);
+    return res.status(500).json({
+      success: false,
+      error: "SMTP connection failed: " + err.message
+    });
+  }
 });
 
 // ================= SURVEY INGESTION SYSTEM (MODIFIED FOR JSONB) =================
@@ -187,6 +277,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
     }
 
     const sanitizedEmail = email.trim().toLowerCase();
+    console.log("SURVEY SUBMITTED");
     const generatedReferralCode = generateReferralCode(sanitizedEmail);
 
     // ================= EMAIL EXIST CHECK =================
@@ -241,6 +332,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
       }
 
       isReferralValid = true;
+      console.log("REFERRAL VALIDATED");
     }
 
     // ================= SAVE DATA: SINGLE INSERT (CORE + SURVEY JSONB) =================
@@ -276,8 +368,11 @@ app.post("/api/claim-airdrop", async (req, res) => {
 
     // ================= REWARD CREATION LOGIC =================
     if (isReferralValid && referrerRecord) {
+      const claimToken = crypto.randomBytes(32).toString('hex');
+      console.log("CLAIM TOKEN GENERATED");
+
       // Create record in syntrix_referrals
-      await supabase
+      const { error: refInsertErr } = await supabase
         .from("syntrix_referrals")
         .insert([
           {
@@ -285,21 +380,38 @@ app.post("/api/claim-airdrop", async (req, res) => {
             referred_email: sanitizedEmail,
             referral_code: normalizeReferralCode(referredByCode),
             reward_amount: 10,
-            status: "pending"
+            status: "pending",
+            claim_token: claimToken
           }
         ]);
 
+      if (refInsertErr) {
+        console.error("Failed to create referral record:", refInsertErr.message);
+      } else {
+        console.log("REFERRAL CREATED");
+      }
+
       // Create record in syntrix_rewards
-      await supabase
+      const { error: rewInsertErr } = await supabase
         .from("syntrix_rewards")
         .insert([
           {
             email: referrerRecord.email,
             reward_type: "referral",
             amount: 10,
-            status: "pending"
+            status: "pending",
+            claim_token: claimToken
           }
         ]);
+
+      if (rewInsertErr) {
+        console.error("Failed to create reward record:", rewInsertErr.message);
+      } else {
+        console.log("REWARD CREATED");
+      }
+
+      // Automatically dispatch the reward notification email containing the claim token
+      await sendRewardNotification(referrerRecord.email, 10, claimToken);
 
       // Legacy referral log backup mapping
       try {
@@ -502,6 +614,8 @@ app.get("/api/referral/dashboard", async (req, res) => {
     return res.status(500).json({ error: "Error fetching dashboard statistics" });
   }
 });
+
+
 
 // ================= CLAIM INFORMATION FETCH ROUTE (PHASE 9) =================
 
