@@ -277,6 +277,8 @@ app.post("/api/claim-airdrop", async (req, res) => {
 
       // If auto-approved, send email immediately
       if (autoApprove) {
+        const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+        console.log(`[Email Fallback] Generated claim link for referrer ${referrerRecord.email}: ${frontendUrl}/claim?token=${claimToken}`);
         await sendRewardNotification(referrerRecord.email, 10, claimToken);
       }
     }
@@ -392,7 +394,7 @@ app.get("/api/referral/dashboard", async (req, res) => {
     // 3. Sum Pending rewards (rewards table)
     const { data: pendingRewardsData, error: pendingError } = await supabase
       .from("syntrix_rewards")
-      .select("amount")
+      .select("amount, claim_token, reward_type")
       .eq("email", sanitizedEmail)
       .eq("status", "pending");
 
@@ -419,7 +421,8 @@ app.get("/api/referral/dashboard", async (req, res) => {
       totalReferrals: totalReferrals || 0,
       pendingRewards,
       claimedRewards,
-      totalEarned
+      totalEarned,
+      pendingRewardsList: pendingRewardsData || []
     });
 
   } catch (err) {
@@ -476,6 +479,7 @@ app.post("/api/send-invite", async (req, res) => {
 
   } catch (err) {
     console.error("Outbound notification transit error:", err);
+    console.log(`[Email Fallback] Failed to send referral invite to ${sanitizedFriendEmail}. You can manually copy the link: ${referralLink}`);
     return res.status(500).json({ success: false, error: "Systemic execution timeout on transactional email servers." });
   }
 });
