@@ -278,8 +278,8 @@ app.post("/api/claim-airdrop", async (req, res) => {
   try {
     const {
       email,
-      referredByCode, // Referral code from URL parameter / landing page memory
-      ...surveyData // Dynamically captures all questionnaire responses from data.js
+      referredByCode, 
+      answers // CRITICAL FIX: Destructure explicitly from body to capture payload matching script.js
     } = req.body;
 
     // ================= VALIDATION =================
@@ -346,9 +346,8 @@ app.post("/api/claim-airdrop", async (req, res) => {
       console.log("REFERRAL VALIDATED");
     }
 
-    // ================= SAVE DATA: TWO-PART INSERT (CORE + SEPARATE SURVEY TABLE) =================
-    
-    // FIX: Only insert the core claims data here. survey_data column removed to match your schema.
+    // ================= SAVE DATA: DIRECT ALIGNMENT WITH WORLD.SQL COLUMNS =================
+    // Mapped data straight to your native 'survey_data' JSONB column in the single insert block
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([
@@ -356,38 +355,27 @@ app.post("/api/claim-airdrop", async (req, res) => {
           email: sanitizedEmail,
           amount_rewarded: 10,
           status: "pending",
-          referral_code: generatedReferralCode // Phase 2: Permanent assignment
+          referral_code: generatedReferralCode,
+          survey_data: answers // Syncs seamlessly with the answers bundle passed from the frontend
         }
       ])
       .select("id, email, status, wallet_address")
       .single();
-
-    if (!claimError && claimData) {
-      console.log("[Survey Submission] Created claim row details:", {
-        id: claimData.id,
-        email: claimData.email,
-        status: claimData.status,
-        wallet_address: claimData.wallet_address
-      });
-      
-      // FIX: Insert Survey Answers strictly into the syntrix_survey_answers table
-      if (Object.keys(surveyData).length > 0) {
-        const { error: surveyErr } = await supabase
-          .from("syntrix_survey_answers")
-          .insert([{
-            claim_id: claimData.id,
-            email: sanitizedEmail,
-            payload: surveyData
-          }]);
-        if (surveyErr) console.error("Survey Answer storage warning:", surveyErr.message);
-      }
-    }
 
     if (claimError) {
       if (claimError.code === "23505") {
         return res.status(400).json({ error: "This email has already submitted the survey." });
       }
       return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
+    }
+
+    if (claimData) {
+      console.log("[Survey Submission] Created claim row details:", {
+        id: claimData.id,
+        email: claimData.email,
+        status: claimData.status,
+        wallet_address: claimData.wallet_address
+      });
     }
 
     // ================= REWARD CREATION LOGIC =================
@@ -465,7 +453,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
   }
 });
 
-// ================= DASHBOARD-AUTH LEDGER RECOVERY (MODIFIED) =================
+// ================= DASHBOARD-AUTH LEDGER RECOVERY (MODIFIED STRUCTURAL STATES) =================
 
 app.get("/api/dashboard-auth", async (req, res) => {
   const { email, ref } = req.query;
@@ -548,7 +536,8 @@ app.get("/api/dashboard-auth", async (req, res) => {
 
       return res.json({ 
         exists: false,
-        isClaimed: false
+        isClaimed: false,
+        status: "FLOW_C" // Informs frontend it is a new user path
       });
     }
 
@@ -557,7 +546,7 @@ app.get("/api/dashboard-auth", async (req, res) => {
     return res.json({
       exists: true,
       isClaimed: isClaimed,
-      status: userProfile.status,
+      status: isClaimed ? "FLOW_B" : "FLOW_A", // CRITICAL FIX: Frontend now cleanly resolves routing parameters
       txHash: userProfile.tx_hash || null,
       walletAddress: userProfile.wallet_address || null,
       referralCode: userProfile.referral_code || null
