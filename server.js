@@ -12,6 +12,17 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
+// ================= MEMORY OPTIMIZATION & TIMEOUT GUARD =================
+// Prevents server crashes and memory leaks by dropping hanging requests after 10 seconds
+app.use((req, res, next) => {
+  res.setTimeout(10000, () => {
+    if (!res.headersSent) {
+      res.status(408).send({ success: false, error: 'Network timeout: Request exceeded 10 seconds.' });
+    }
+  });
+  next();
+});
+
 // ================= SUPABASE CLIENT =================
 
 const supabase = createClient(
@@ -261,7 +272,7 @@ app.post("/api/send-invite", async (req, res) => {
   }
 });
 
-// ================= SURVEY INGESTION SYSTEM (MODIFIED FOR JSONB) =================
+// ================= SURVEY INGESTION SYSTEM (MODIFIED FOR JSONB & SCHEMA ALIGNMENT) =================
 
 app.post("/api/claim-airdrop", async (req, res) => {
   try {
@@ -335,7 +346,9 @@ app.post("/api/claim-airdrop", async (req, res) => {
       console.log("REFERRAL VALIDATED");
     }
 
-    // ================= SAVE DATA: SINGLE INSERT (CORE + SURVEY JSONB) =================
+    // ================= SAVE DATA: TWO-PART INSERT (CORE + SEPARATE SURVEY TABLE) =================
+    
+    // FIX: Only insert the core claims data here. survey_data column removed to match your schema.
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([
@@ -343,8 +356,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
           email: sanitizedEmail,
           amount_rewarded: 10,
           status: "pending",
-          referral_code: generatedReferralCode, // Phase 2: Permanent assignment
-          survey_data: surveyData // Store survey inside single JSONB column
+          referral_code: generatedReferralCode // Phase 2: Permanent assignment
         }
       ])
       .select("id, email, status, wallet_address")
@@ -357,6 +369,18 @@ app.post("/api/claim-airdrop", async (req, res) => {
         status: claimData.status,
         wallet_address: claimData.wallet_address
       });
+      
+      // FIX: Insert Survey Answers strictly into the syntrix_survey_answers table
+      if (Object.keys(surveyData).length > 0) {
+        const { error: surveyErr } = await supabase
+          .from("syntrix_survey_answers")
+          .insert([{
+            claim_id: claimData.id,
+            email: sanitizedEmail,
+            payload: surveyData
+          }]);
+        if (surveyErr) console.error("Survey Answer storage warning:", surveyErr.message);
+      }
     }
 
     if (claimError) {
@@ -615,8 +639,6 @@ app.get("/api/referral/dashboard", async (req, res) => {
   }
 });
 
-
-
 // ================= CLAIM INFORMATION FETCH ROUTE (PHASE 9) =================
 
 app.get("/api/rewards/claim-info", async (req, res) => {
@@ -743,7 +765,7 @@ app.post("/api/rewards/claim", async (req, res) => {
         txHash = tx.hash;
       } catch (blockchainErr) {
         console.error("Contract payout distribution failed. Reverting lock status.", blockchainErr);
-        // Rollback state back to pending for retry on error
+        // FIX: Rollback state back to pending for retry on error
         await supabase
           .from("syntrix_rewards")
           .update({ status: "pending" })
@@ -863,12 +885,18 @@ app.post("/api/claim-reward", async (req, res) => {
     let txHash = "0x" + crypto.randomBytes(32).toString("hex");
 
     if (tokenContract) {
-      const decimals = await tokenContract.decimals();
-      const amount = ethers.parseUnits("10", decimals);
+      try {
+        const decimals = await tokenContract.decimals();
+        const amount = ethers.parseUnits("10", decimals);
 
-      const tx = await tokenContract.transfer(sanitizedWallet, amount);
-      await tx.wait();
-      txHash = tx.hash;
+        const tx = await tokenContract.transfer(sanitizedWallet, amount);
+        await tx.wait();
+        txHash = tx.hash;
+      } catch (blockchainErr) {
+        console.warn("Contract execution failed during lazy claim:", blockchainErr);
+        // FIX: Return early so we don't accidentally update the database if the blockchain transfer fails
+        return res.status(502).json({ error: "Blockchain execution failed: " + blockchainErr.message });
+      }
     } else {
       console.warn("Bypassing on-chain token deployment (survey dispenser). Using mock hash ID:", txHash);
     }
