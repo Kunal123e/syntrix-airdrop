@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS syntrix_rewards (
     amount NUMERIC NOT NULL,
     status TEXT DEFAULT 'pending' NOT NULL 
         CHECK (status IN ('pending', 'claimed', 'rejected')),
-    claim_token TEXT UNIQUE NOT NULL, -- Constraint: claim_token becomes invalid after claim (Phase 11)
+    claim_token TEXT UNIQUE, -- Links to claim settlement details
     tx_hash TEXT UNIQUE, -- Stores blockchain transaction hash
     claimed_wallet TEXT, -- Wallet address that received the tokens
     created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
