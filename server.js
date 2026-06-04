@@ -227,12 +227,8 @@ app.post("/api/claim-airdrop", async (req, res) => {
       return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
     }
 
-    // ================= REWARD CREATION LOGIC (PHASE 6) =================
+    // ================= REWARD CREATION LOGIC =================
     if (isReferralValid && referrerRecord) {
-      const claimToken = crypto.randomBytes(32).toString("hex");
-      const autoApprove = process.env.AUTO_APPROVE_REFERRALS === "true";
-      const referralStatus = autoApprove ? "approved" : "pending";
-
       // Create record in syntrix_referrals
       await supabase
         .from("syntrix_referrals")
@@ -242,8 +238,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
             referred_email: sanitizedEmail,
             referral_code: referredByCode.trim().toUpperCase(),
             reward_amount: 10,
-            status: referralStatus,
-            claim_token: claimToken
+            status: "pending"
           }
         ]);
 
@@ -255,8 +250,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
             email: referrerRecord.email,
             reward_type: "referral",
             amount: 10,
-            status: "pending", // Pending claim
-            claim_token: claimToken
+            status: "pending"
           }
         ]);
 
@@ -268,18 +262,11 @@ app.post("/api/claim-airdrop", async (req, res) => {
             {
               referrer_email: referrerRecord.email,
               referred_friend_email: sanitizedEmail,
-              status: autoApprove ? "completed" : "pending"
+              status: "pending"
             }
           ]);
       } catch (err) {
         console.warn("Legacy referral logging bypass:", err.message);
-      }
-
-      // If auto-approved, send email immediately
-      if (autoApprove) {
-        const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-        console.log(`[Email Fallback] Generated claim link for referrer ${referrerRecord.email}: ${frontendUrl}/claim?token=${claimToken}`);
-        await sendRewardNotification(referrerRecord.email, 10, claimToken);
       }
     }
 
