@@ -180,6 +180,90 @@ async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
   }
 }
 
+// ================= OTP MEMORY STORE =================
+// Temporarily stores OTPs in server memory
+const otpStorage = {};
+
+// Clears expired OTPs every 10 minutes to save memory
+setInterval(() => {
+  const now = Date.now();
+  for (const email in otpStorage) {
+    if (otpStorage[email].expires < now) {
+      delete otpStorage[email];
+    }
+  }
+}, 10 * 60 * 1000);
+
+// ================= OTP ROUTES =================
+
+// 1. Send OTP Route
+app.post("/api/send-otp", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: "Email required." });
+
+  const sanitizedEmail = email.trim().toLowerCase();
+  
+  // Generate a random 6-digit code
+  const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+  
+  // Store it in memory for 10 minutes
+  otpStorage[sanitizedEmail] = {
+    otp: otpCode,
+    expires: Date.now() + 10 * 60 * 1000 // 10 mins
+  };
+
+  const mailOptions = {
+    from: `"Syntrix Security" <${emailUser}>`,
+    to: sanitizedEmail,
+    subject: `Your Syntrix Verification Code: ${otpCode}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; padding: 25px; border: 1px solid #e2e8f0; border-radius: 12px; max-width: 500px;">
+        <h2 style="color: #4f46e5; margin-top: 0;">Syntrix Verification</h2>
+        <p>Please use the following 6-digit code to verify your identity and enter the network.</p>
+        <div style="background-color: #f8fafc; padding: 15px; margin: 20px 0; text-align: center; border-radius: 6px;">
+          <span style="font-size: 28px; font-weight: bold; letter-spacing: 5px; color: #1e293b;">${otpCode}</span>
+        </div>
+        <p style="color: #64748b; font-size: 12px;">This code will expire in 10 minutes. If you did not request this, ignore this email.</p>
+      </div>
+    `
+  };
+
+  try {
+    await mailTransporter.sendMail(mailOptions);
+    console.log(`[OTP] Sent to ${sanitizedEmail}`);
+    return res.json({ success: true, message: "OTP Sent" });
+  } catch (err) {
+    console.error(`[OTP] Failed to send to ${sanitizedEmail}:`, err.message);
+    return res.status(500).json({ error: "Failed to deliver email. Check SMTP settings." });
+  }
+});
+
+// 2. Verify OTP Route
+app.post("/api/verify-otp", (req, res) => {
+  const { email, otp } = req.body;
+  if (!email || !otp) return res.status(400).json({ error: "Email and OTP required." });
+
+  const sanitizedEmail = email.trim().toLowerCase();
+  const record = otpStorage[sanitizedEmail];
+
+  if (!record) {
+    return res.status(400).json({ error: "OTP expired or not requested. Please send a new code." });
+  }
+
+  if (record.expires < Date.now()) {
+    delete otpStorage[sanitizedEmail];
+    return res.status(400).json({ error: "OTP has expired." });
+  }
+
+  if (record.otp !== otp.trim()) {
+    return res.status(400).json({ error: "Invalid OTP code." });
+  }
+
+  // If valid, delete the code so it can't be reused, and grant access!
+  delete otpStorage[sanitizedEmail];
+  return res.json({ success: true });
+});
+
 // ================= TEST ROUTE =================
 
 app.get("/", (req, res) => {
