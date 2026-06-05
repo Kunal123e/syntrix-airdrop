@@ -128,7 +128,6 @@ function normalizeReferralCode(code) {
  * Sends a reward claim notification email to the referrer
  */
 async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
-  // Prevent sending invalid claim links
   if (!claimToken) {
     console.error("Missing claim token");
     return false;
@@ -356,14 +355,14 @@ app.post("/api/send-invite", async (req, res) => {
   }
 });
 
-// ================= SURVEY INGESTION SYSTEM (MODIFIED FOR JSONB & SCHEMA ALIGNMENT) =================
+// ================= SURVEY INGESTION SYSTEM =================
 
 app.post("/api/claim-airdrop", async (req, res) => {
   try {
     const {
       email,
       referredByCode, 
-      answers // CRITICAL FIX: Destructure explicitly from body to capture payload matching script.js
+      answers
     } = req.body;
 
     // ================= VALIDATION =================
@@ -386,14 +385,14 @@ app.post("/api/claim-airdrop", async (req, res) => {
       return res.status(400).json({ error: "This email has already submitted the survey." });
     }
 
-    // ================= REFERRAL VALIDATION (PHASE 5) =================
+    // ================= REFERRAL VALIDATION =================
     let referrerRecord = null;
     let isReferralValid = false;
 
     if (referredByCode) {
       const cleanRefCode = normalizeReferralCode(referredByCode);
 
-      // Rule 3: Self-referral protection (User cannot refer themselves)
+      // Rule 3: Self-referral protection
       if (cleanRefCode === generatedReferralCode) {
         return res.status(400).json({ error: "You cannot refer yourself." });
       }
@@ -430,8 +429,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
       console.log("REFERRAL VALIDATED");
     }
 
-    // ================= SAVE DATA: DIRECT ALIGNMENT WITH WORLD.SQL COLUMNS =================
-    // Mapped data straight to your native 'survey_data' JSONB column in the single insert block
+    // ================= SAVE DATA =================
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([
@@ -440,7 +438,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
           amount_rewarded: 10,
           status: "pending",
           referral_code: generatedReferralCode,
-          survey_data: answers // Syncs seamlessly with the answers bundle passed from the frontend
+          survey_data: answers 
         }
       ])
       .select("id, email, status, wallet_address")
@@ -467,7 +465,6 @@ app.post("/api/claim-airdrop", async (req, res) => {
       const claimToken = crypto.randomBytes(32).toString('hex');
       console.log("CLAIM TOKEN GENERATED");
 
-      // Create record in syntrix_referrals
       const { error: refInsertErr } = await supabase
         .from("syntrix_referrals")
         .insert([
@@ -487,7 +484,6 @@ app.post("/api/claim-airdrop", async (req, res) => {
         console.log("REFERRAL CREATED");
       }
 
-      // Create record in syntrix_rewards
       const { error: rewInsertErr } = await supabase
         .from("syntrix_rewards")
         .insert([
@@ -506,10 +502,8 @@ app.post("/api/claim-airdrop", async (req, res) => {
         console.log("REWARD CREATED");
       }
 
-      // Automatically dispatch the reward notification email containing the claim token
       await sendRewardNotification(referrerRecord.email, 10, claimToken);
 
-      // Legacy referral log backup mapping
       try {
         await supabase
           .from("syntrix_referral_logs")
@@ -537,7 +531,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
   }
 });
 
-// ================= DASHBOARD-AUTH LEDGER RECOVERY (MODIFIED STRUCTURAL STATES) =================
+// ================= DASHBOARD-AUTH LEDGER RECOVERY =================
 
 app.get("/api/dashboard-auth", async (req, res) => {
   const { email, ref } = req.query;
@@ -551,12 +545,10 @@ app.get("/api/dashboard-auth", async (req, res) => {
       const cleanRefCode = normalizeReferralCode(ref);
       const generatedReferralCode = generateReferralCode(sanitizedEmail);
 
-      // Rule 3: Self-referral protection (User cannot refer themselves)
       if (cleanRefCode === generatedReferralCode) {
         return res.status(400).json({ error: "You cannot refer yourself." });
       }
 
-      // Rule 1 & 2: Check if code exists and belongs to another user
       const { data: referrerClaim, error: refError } = await supabase
         .from("syntrix_claims")
         .select("email")
@@ -571,7 +563,6 @@ app.get("/api/dashboard-auth", async (req, res) => {
         return res.status(400).json({ error: "Self-referral check: Code belongs to this email." });
       }
 
-      // Rule 4: One referral reward per referred email
       const { data: alreadyReferred } = await supabase
         .from("syntrix_referrals")
         .select("id")
@@ -592,7 +583,6 @@ app.get("/api/dashboard-auth", async (req, res) => {
     if (error) return res.status(500).json({ error: error.message });
 
     if (!userProfile) {
-      // Legacy referral logs hook
       if (ref) {
         const cleanRefCode = normalizeReferralCode(ref);
         try {
@@ -621,7 +611,7 @@ app.get("/api/dashboard-auth", async (req, res) => {
       return res.json({ 
         exists: false,
         isClaimed: false,
-        status: "FLOW_C" // Informs frontend it is a new user path
+        status: "FLOW_C"
       });
     }
 
@@ -630,7 +620,7 @@ app.get("/api/dashboard-auth", async (req, res) => {
     return res.json({
       exists: true,
       isClaimed: isClaimed,
-      status: isClaimed ? "FLOW_B" : "FLOW_A", // CRITICAL FIX: Frontend now cleanly resolves routing parameters
+      status: isClaimed ? "FLOW_B" : "FLOW_A",
       txHash: userProfile.tx_hash || null,
       walletAddress: userProfile.wallet_address || null,
       referralCode: userProfile.referral_code || null
@@ -642,7 +632,7 @@ app.get("/api/dashboard-auth", async (req, res) => {
   }
 });
 
-// ================= REFERRAL DASHBOARD DATA API (PHASE 7) =================
+// ================= REFERRAL DASHBOARD DATA API =================
 
 app.get("/api/referral/dashboard", async (req, res) => {
   const { email } = req.query;
@@ -651,7 +641,6 @@ app.get("/api/referral/dashboard", async (req, res) => {
   try {
     const sanitizedEmail = email.trim().toLowerCase();
 
-    // 1. Get user referral code
     const { data: userClaim, error: claimError } = await supabase
       .from("syntrix_claims")
       .select("referral_code")
@@ -664,7 +653,6 @@ app.get("/api/referral/dashboard", async (req, res) => {
 
     const referralCode = userClaim.referral_code || generateReferralCode(sanitizedEmail);
 
-    // 2. Count total referrals
     const { count: totalReferrals, error: countError } = await supabase
       .from("syntrix_referrals")
       .select("id", { count: "exact", head: true })
@@ -672,7 +660,6 @@ app.get("/api/referral/dashboard", async (req, res) => {
 
     if (countError) return res.status(500).json({ error: countError.message });
 
-    // 3. Sum Pending rewards (rewards table)
     const { data: pendingRewardsData, error: pendingError } = await supabase
       .from("syntrix_rewards")
       .select("amount, claim_token, reward_type")
@@ -682,7 +669,6 @@ app.get("/api/referral/dashboard", async (req, res) => {
     if (pendingError) return res.status(500).json({ error: pendingError.message });
     const pendingRewards = pendingRewardsData.reduce((sum, item) => sum + Number(item.amount), 0);
 
-    // 4. Sum Claimed rewards (rewards table)
     const { data: claimedRewardsData, error: claimedError } = await supabase
       .from("syntrix_rewards")
       .select("amount")
@@ -712,7 +698,7 @@ app.get("/api/referral/dashboard", async (req, res) => {
   }
 });
 
-// ================= CLAIM INFORMATION FETCH ROUTE (PHASE 9) =================
+// ================= CLAIM INFORMATION FETCH ROUTE =================
 
 app.get("/api/rewards/claim-info", async (req, res) => {
   const { token } = req.query;
@@ -743,7 +729,7 @@ app.get("/api/rewards/claim-info", async (req, res) => {
   }
 });
 
-// ================= TOKEN CLAIMS VIA METAMASK (PHASE 9 & 10 & 11) =================
+// ================= TOKEN CLAIMS VIA METAMASK =================
 
 app.post("/api/rewards/claim", async (req, res) => {
   const { token, walletAddress, signature } = req.body;
@@ -759,7 +745,6 @@ app.post("/api/rewards/claim", async (req, res) => {
   try {
     const sanitizedWallet = walletAddress.trim().toLowerCase();
 
-    // 1. Resolve reward token claim properties
     const { data: rewardRecord, error: fetchErr } = await supabase
       .from("syntrix_rewards")
       .select("id, email, amount, status, reward_type")
@@ -776,9 +761,7 @@ app.post("/api/rewards/claim", async (req, res) => {
 
     const email = rewardRecord.email.trim().toLowerCase();
 
-    // ================= WALLET PROTECTION RULES (PHASE 10) =================
-
-    // Rule A: One wallet address can belong to only one email account.
+    // ================= WALLET PROTECTION RULES =================
     const { data: walletMap } = await supabase
       .from("syntrix_wallets")
       .select("email")
@@ -789,7 +772,6 @@ app.post("/api/rewards/claim", async (req, res) => {
       return res.status(400).json({ error: "This wallet is already linked to another account." });
     }
 
-    // Rule B: One email account can only be associated with one wallet address.
     const { data: emailMap } = await supabase
       .from("syntrix_wallets")
       .select("wallet_address")
@@ -811,8 +793,7 @@ app.post("/api/rewards/claim", async (req, res) => {
       return res.status(400).json({ error: "Signature verification processing error: " + sigErr.message });
     }
 
-    // ================= PREVENT DOUBLE SPENDING (RACE CONDITION) =================
-    // Claim the row immediately prior to contract invocation
+    // ================= PREVENT DOUBLE SPENDING =================
     const { data: claimedRow, error: claimLockErr } = await supabase
       .from("syntrix_rewards")
       .update({ status: "claimed" })
@@ -838,7 +819,6 @@ app.post("/api/rewards/claim", async (req, res) => {
         txHash = tx.hash;
       } catch (blockchainErr) {
         console.error("Contract payout distribution failed. Reverting lock status.", blockchainErr);
-        // FIX: Rollback state back to pending for retry on error
         await supabase
           .from("syntrix_rewards")
           .update({ status: "pending" })
@@ -849,15 +829,13 @@ app.post("/api/rewards/claim", async (req, res) => {
       console.warn("Bypassing on-chain token deployment. Using mock hash ID:", txHash);
     }
 
-    // ================= PERSIST REGISTRY STATUS MAPPING (PHASE 10 & 11) =================
-    // Map email/wallet permanently
+    // ================= PERSIST REGISTRY STATUS MAPPING =================
     if (!emailMap) {
       await supabase
         .from("syntrix_wallets")
         .upsert({ email: email, wallet_address: sanitizedWallet });
     }
 
-    // Update reward properties
     await supabase
       .from("syntrix_rewards")
       .update({
@@ -867,7 +845,6 @@ app.post("/api/rewards/claim", async (req, res) => {
       })
       .eq("id", rewardRecord.id);
 
-    // Update referral tracker properties status
     if (rewardRecord.reward_type === "referral") {
       await supabase
         .from("syntrix_referrals")
@@ -903,7 +880,6 @@ app.post("/api/claim-reward", async (req, res) => {
     const sanitizedEmail = email.trim().toLowerCase();
     const sanitizedWallet = walletAddress.trim().toLowerCase();
 
-    // 1. Verify user profile exists and is still pending
     console.log(`[Claim Retrieval] Attempting lookup. Email received: "${sanitizedEmail}". Query table: "syntrix_claims"`);
 
     const { data: userRecord, error: fetchError } = await supabase
@@ -920,8 +896,6 @@ app.post("/api/claim-reward", async (req, res) => {
       return res.status(400).json({ error: "Rewards have already been successfully distributed to this email." });
     }
 
-    // ================= WALLET PROTECTION RULES (PHASE 10) =================
-    // Rule A: One wallet address can belong to only one email account.
     const { data: walletMap } = await supabase
       .from("syntrix_wallets")
       .select("email")
@@ -932,7 +906,6 @@ app.post("/api/claim-reward", async (req, res) => {
       return res.status(400).json({ error: "This wallet is already linked to another account." });
     }
 
-    // Rule B: One email account can only be associated with one wallet address.
     const { data: emailMap } = await supabase
       .from("syntrix_wallets")
       .select("wallet_address")
@@ -943,7 +916,6 @@ app.post("/api/claim-reward", async (req, res) => {
       return res.status(400).json({ error: `This email is already associated with a different wallet address: ${emailMap.wallet_address}` });
     }
 
-    // 2. Prevent double claim by checking duplicate wallet in syntrix_claims table
     const { data: duplicateWallet } = await supabase
       .from("syntrix_claims")
       .select("id")
@@ -954,7 +926,6 @@ app.post("/api/claim-reward", async (req, res) => {
       return res.status(400).json({ error: "This wallet address has already been used to claim a survey reward." });
     }
 
-    // 3. Execute Blockchain Token Transfer
     let txHash = "0x" + crypto.randomBytes(32).toString("hex");
 
     if (tokenContract) {
@@ -967,14 +938,12 @@ app.post("/api/claim-reward", async (req, res) => {
         txHash = tx.hash;
       } catch (blockchainErr) {
         console.warn("Contract execution failed during lazy claim:", blockchainErr);
-        // FIX: Return early so we don't accidentally update the database if the blockchain transfer fails
         return res.status(502).json({ error: "Blockchain execution failed: " + blockchainErr.message });
       }
     } else {
       console.warn("Bypassing on-chain token deployment (survey dispenser). Using mock hash ID:", txHash);
     }
 
-    // 4. Update the primary registry row to close the loop
     const { error: updateError } = await supabase
       .from("syntrix_claims")
       .update({
@@ -986,14 +955,12 @@ app.post("/api/claim-reward", async (req, res) => {
 
     if (updateError) return res.status(500).json({ error: "Registry Finalization Failure: " + updateError.message });
 
-    // Enforce permanent wallet link table
     if (!emailMap) {
       await supabase
         .from("syntrix_wallets")
         .upsert({ email: sanitizedEmail, wallet_address: sanitizedWallet });
     }
 
-    // 5. Update legacy referral logs status cleanly if they were brought in via reference pipelines
     try {
       await supabase
         .from("syntrix_referral_logs")
@@ -1014,14 +981,13 @@ app.post("/api/claim-reward", async (req, res) => {
   }
 });
 
-// ================= ADMIN: REFERRAL APPROVAL ROUTE (PHASE 8 & 12) =================
+// ================= ADMIN: REFERRAL APPROVAL ROUTE =================
 
 app.post("/api/admin/referrals/approve", async (req, res) => {
   const { referralId } = req.body;
   if (!referralId) return res.status(400).json({ error: "Referral ID required." });
 
   try {
-    // 1. Fetch pending referral record
     const { data: referral, error: fetchErr } = await supabase
       .from("syntrix_referrals")
       .select("*")
@@ -1036,7 +1002,6 @@ app.post("/api/admin/referrals/approve", async (req, res) => {
       return res.status(400).json({ error: `Referral status is already ${referral.status}.` });
     }
 
-    // 2. Update status to approved
     const { error: updateErr } = await supabase
       .from("syntrix_referrals")
       .update({ status: "approved" })
@@ -1044,14 +1009,12 @@ app.post("/api/admin/referrals/approve", async (req, res) => {
 
     if (updateErr) return res.status(500).json({ error: "Failed to update referral status: " + updateErr.message });
 
-    // 3. Dispatch reward notification email
     const emailSent = await sendRewardNotification(
       referral.referrer_email,
       referral.reward_amount,
       referral.claim_token
     );
 
-    // 4. Update legacy log status to approved
     try {
       await supabase
         .from("syntrix_referral_logs")
