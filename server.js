@@ -13,11 +13,11 @@ app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
 // ================= MEMORY OPTIMIZATION & TIMEOUT GUARD =================
-// Prevents server crashes and memory leaks by dropping hanging requests after 10 seconds
+// Prevents server crashes and memory leaks by dropping hanging requests after 60 seconds
 app.use((req, res, next) => {
-  res.setTimeout(10000, () => {
+  res.setTimeout(60000, () => {
     if (!res.headersSent) {
-      res.status(408).send({ success: false, error: 'Network timeout: Request exceeded 10 seconds.' });
+      res.status(408).send({ success: false, error: 'Network timeout: Request exceeded 60 seconds.' });
     }
   });
   next();
