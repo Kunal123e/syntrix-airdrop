@@ -54,7 +54,7 @@ if (process.env.RPC_URL && process.env.PRIVATE_KEY && process.env.TOKEN_ADDRESS)
   console.warn("Blockchain credentials missing in .env. Claim routes will run in MOCK mode.");
 }
 
-// ================= SMTP EMAIL SETUP =================
+// ================= SMTP EMAIL SETUP (FIXED FIREWALL SETTINGS) =================
 
 const emailUser = process.env.EMAIL_USER || process.env.GMAIL_USER_ACCOUNT;
 const emailPass = process.env.EMAIL_PASS || process.env.GMAIL_APP_PASSWORD;
@@ -81,12 +81,18 @@ if (emailPass) {
   }
 }
 
+// THE FIX: Explicitly forcing Port 465 (SSL) to punch through Render's Firewall
 const mailTransporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true, 
   auth: {
     user: emailUser,
     pass: emailPass
-  }
+  },
+  connectionTimeout: 20000, 
+  greetingTimeout: 20000,
+  socketTimeout: 20000
 });
 
 // ================= HELPERS =================
