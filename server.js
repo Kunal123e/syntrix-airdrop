@@ -47,12 +47,12 @@ if (process.env.RPC_URL && process.env.PRIVATE_KEY && process.env.TOKEN_ADDRESS)
     provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
     tokenContract = new ethers.Contract(process.env.TOKEN_ADDRESS, TOKEN_ABI, wallet);
-    console.log("Blockchain configuration initialized successfully.");
+    console.log("Blockchain system online. Master Wallet Address:", wallet.address);
   } catch (err) {
     console.error("Blockchain provider initialization failed:", err.message);
   }
 } else {
-  console.warn("Blockchain credentials missing in .env. Claim routes will run in MOCK mode.");
+  console.warn("Blockchain credentials missing in .env. Claim routes will run in MOCK queue engine mode.");
 }
 
 // ================= BREVO HTTP EMAIL API SETUP =================
@@ -208,7 +208,7 @@ app.post("/api/verify-otp", (req, res) => {
 
 // ================= TEST ROUTES =================
 app.get("/", (req, res) => {
-  res.json({ success: true, message: "Syntrix Referral Backend Operating with HTTP Email API" });
+  res.json({ success: true, message: "Syntrix Referral Backend Operating with Dedicated Queue Architecture" });
 });
 
 app.post("/api/test-email", async (req, res) => {
@@ -246,7 +246,6 @@ app.post("/api/send-invite", async (req, res) => {
 });
 
 // ================= SURVEY INGESTION SYSTEM =================
-// Backward compatible endpoint map for old modules or custom actions
 app.post("/api/submit-survey", async (req, res) => {
   try {
     const { email, referredBy, answers } = req.body;
@@ -367,6 +366,15 @@ app.get("/api/user-status", async (req, res) => {
       .maybeSingle();
 
     if (error) return res.status(500).json({ error: error.message });
+    
+    // Check if they have an active task sitting inside our queue table
+    const { data: queuedItems } = await supabase.from("syntrix_payout_queue")
+      .select("status, tx_hash")
+      .eq("email", sanitizedEmail)
+      .order("id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
     if (!userProfile) return res.json({ success: false, exists: false, isClaimed: false, status: "FLOW_C" });
 
     // Fetch referral dashboard aggregates directly to return to frontend
@@ -375,22 +383,20 @@ app.get("/api/user-status", async (req, res) => {
       .select("id", { count: "exact", head: true })
       .eq("referrer_email", sanitizedEmail);
 
-    const { data: pendingRewardsData } = await supabase
-      .from("syntrix_rewards")
-      .select("amount")
-      .eq("email", sanitizedEmail)
-      .eq("status", "pending");
+    const { data: rewards } = await supabase.from("syntrix_rewards").select("amount, status").eq("email", sanitizedEmail);
 
-    const { data: claimedRewardsData } = await supabase
-      .from("syntrix_rewards")
-      .select("amount")
-      .eq("email", sanitizedEmail)
-      .eq("status", "claimed");
+    let pendingRewards = 0, claimedRewards = 0;
+    if (rewards) {
+      rewards.forEach(r => {
+        if (r.status === "pending" || r.status === "processing") pendingRewards += Number(r.amount);
+        if (r.status === "claimed") claimedRewards += Number(r.amount);
+      });
+    }
 
-    const pendingRewards = (pendingRewardsData || []).reduce((sum, item) => sum + Number(item.amount), 0);
-    const claimedRewards = (claimedRewardsData || []).reduce((sum, item) => sum + Number(item.amount), 0);
-
-    const isClaimed = userProfile.status === "success" || !!(userProfile.tx_hash || userProfile.wallet_address);
+    // Evaluate live transactional states across dependencies
+    const isClaimed = userProfile.status === "success" || 
+                      !!(userProfile.tx_hash || userProfile.wallet_address) ||
+                      (queuedItems && queuedItems.status === "success");
 
     return res.json({
       success: true,
@@ -401,7 +407,7 @@ app.get("/api/user-status", async (req, res) => {
       pendingRewards,
       claimedRewards,
       referralCode: userProfile.referral_code || null,
-      txHash: userProfile.tx_hash || null,
+      txHash: userProfile.tx_hash || (queuedItems ? queuedItems.tx_hash : null),
       walletAddress: userProfile.wallet_address || null
     });
 
@@ -436,7 +442,7 @@ app.get("/api/claim-details", async (req, res) => {
   }
 });
 
-// ================= CRYPTOGRAPHIC TOKEN EXECUTION (MATCHED TO FRONTEND) =================
+// ================= CRYPTOGRAPHIC QUEUE INGESTION ENDPOINT =================
 app.post("/api/execute-claim", async (req, res) => {
   const { token, walletAddress, signature } = req.body;
 
@@ -453,7 +459,7 @@ app.post("/api/execute-claim", async (req, res) => {
       .maybeSingle();
 
     if (fetchErr || !rewardRecord) return res.status(404).json({ error: "Claim token invalid or not found." });
-    if (rewardRecord.status !== "pending") return res.status(400).json({ error: `Reward claim has already been ${rewardRecord.status}.` });
+    if (rewardRecord.status !== "pending") return res.status(400).json({ error: `Reward claim has already been marked as ${rewardRecord.status}.` });
 
     const email = rewardRecord.email.trim().toLowerCase();
 
@@ -471,46 +477,27 @@ app.post("/api/execute-claim", async (req, res) => {
       return res.status(400).json({ error: "Signature verification processing error: " + sigErr.message });
     }
 
-    const { data: claimedRow, error: claimLockErr } = await supabase
-      .from("syntrix_rewards")
-      .update({ status: "claimed" })
-      .eq("id", rewardRecord.id)
-      .eq("status", "pending")
-      .select()
-      .maybeSingle();
+    // Stop duplicate queueing loops if hit concurrently
+    const { data: itemInQueue } = await supabase.from("syntrix_payout_queue").select("id").eq("claim_token", token.trim()).maybeSingle();
+    if (itemInQueue) return res.status(400).json({ error: "This distribution request is already queued for processing." });
 
-    if (claimLockErr || !claimedRow) return res.status(400).json({ error: "This claim is currently being processed or has already been fulfilled." });
+    // Instantly append items to the database transaction log array (Fast execution pathway!)
+    await supabase.from("syntrix_payout_queue").insert([{
+      email: email,
+      wallet_address: sanitizedWallet,
+      reward_amount: Number(rewardRecord.amount),
+      claim_token: token.trim(),
+      status: "queued"
+    }]);
 
-    let txHash = "0x" + crypto.randomBytes(32).toString("hex");
-
-    if (tokenContract) {
-      try {
-        const decimals = await tokenContract.decimals();
-        const amount = ethers.parseUnits(rewardRecord.amount.toString(), decimals);
-        const tx = await tokenContract.transfer(sanitizedWallet, amount);
-        await tx.wait();
-        txHash = tx.hash;
-      } catch (blockchainErr) {
-        await supabase.from("syntrix_rewards").update({ status: "pending" }).eq("id", rewardRecord.id);
-        return res.status(500).json({ error: "Blockchain transaction execution failed: " + blockchainErr.message });
-      }
-    }
-
+    // Lock local database states immediately
+    await supabase.from("syntrix_rewards").update({ status: "processing" }).eq("id", rewardRecord.id);
     if (!emailMap) await supabase.from("syntrix_wallets").upsert({ email: email, wallet_address: sanitizedWallet });
 
-    await supabase
-      .from("syntrix_rewards")
-      .update({ tx_hash: txHash, claimed_wallet: sanitizedWallet, claimed_at: new Date().toISOString() })
-      .eq("id", rewardRecord.id);
-
-    if (rewardRecord.reward_type === "referral") {
-      await supabase.from("syntrix_referrals").update({ status: "claimed" }).eq("claim_token", token.trim());
-    }
-
-    return res.json({ success: true, txHash: txHash });
+    return res.json({ success: true, message: "Claim safely routed to blockchain transactional queue buffers." });
 
   } catch (err) {
-    return res.status(500).json({ error: "Fulfillment failed: " + err.message });
+    return res.status(500).json({ error: "Fulfillment ingestion failed: " + err.message });
   }
 });
 
@@ -537,28 +524,120 @@ app.post("/api/claim-reward", async (req, res) => {
     const { data: duplicateWallet } = await supabase.from("syntrix_claims").select("id").eq("wallet_address", sanitizedWallet).maybeSingle();
     if (duplicateWallet) return res.status(400).json({ error: "This wallet address has already been used to claim a survey reward." });
 
-    let txHash = "0x" + crypto.randomBytes(32).toString("hex");
+    // Push standard survey completions to the processing queue table as well!
+    await supabase.from("syntrix_payout_queue").insert([{
+      email: sanitizedEmail,
+      wallet_address: sanitizedWallet,
+      reward_amount: 10,
+      claim_token: `SURVEY-LAZY-${crypto.randomBytes(8).toString('hex').toUpperCase()}`,
+      status: "queued"
+    }]);
 
-    if (tokenContract) {
-      try {
-        const decimals = await tokenContract.decimals();
-        const amount = ethers.parseUnits("10", decimals);
-        const tx = await tokenContract.transfer(sanitizedWallet, amount);
-        await tx.wait();
-        txHash = tx.hash;
-      } catch (blockchainErr) {
-        return res.status(502).json({ error: "Blockchain execution failed: " + blockchainErr.message });
-      }
-    }
+    await supabase.from("syntrix_claims").update({ status: "processing" }).eq("id", userRecord.id);
 
-    await supabase.from("syntrix_claims").update({ wallet_address: sanitizedWallet, tx_hash: txHash, status: "success" }).eq("id", userRecord.id);
-    if (!emailMap) await supabase.from("syntrix_wallets").upsert({ email: sanitizedEmail, wallet_address: sanitizedWallet });
-
-    return res.json({ success: true, transactionHash: txHash });
+    return res.json({ success: true, message: "Lazy reward request appended to processing queues." });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Smart contract claim execution pipeline blocked." });
   }
 });
+
+// ================= THE BACKGROUND BLOCKCHAIN TRANSACTION QUEUE ENGINE =================
+let isQueueProcessing = false;
+
+async function processPayoutQueueEngine() {
+  if (isQueueProcessing) return; 
+  isQueueProcessing = true;
+
+  try {
+    // Pick up exactly one oldest queued item sequentially
+    const { data: queueJob, error } = await supabase.from("syntrix_payout_queue")
+      .select("*")
+      .eq("status", "queued")
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!queueJob) {
+      isQueueProcessing = false;
+      return;
+    }
+
+    console.log(`[QUEUE ENGINE] Processing job ID ${queueJob.id} for target recipient: ${queueJob.email}`);
+
+    // Set job state to processing immediately to preserve multi-threading barriers
+    await supabase.from("syntrix_payout_queue").update({ status: "processing" }).eq("id", queueJob.id);
+
+    if (!tokenContract) {
+      // Mock mode pipeline processing if private variables are unpopulated
+      const mockTxHash = "0x" + crypto.randomBytes(32).toString("hex");
+      await finalizeSuccessfulQueueJob(queueJob, mockTxHash);
+      isQueueProcessing = false;
+      return;
+    }
+
+    // Real On-Chain Blockchain Payout Processing Node Array
+    try {
+      const decimals = await tokenContract.decimals();
+      const amount = ethers.parseUnits(queueJob.reward_amount.toString(), decimals);
+
+      // Execute automated deduction/transfer from primary host wallet balance allocation
+      const tx = await tokenContract.transfer(queueJob.wallet_address, amount);
+      console.log(`[QUEUE ENGINE] Broadcasted transaction on-chain: ${tx.hash}. Waiting confirmation block metrics...`);
+      
+      await tx.wait();
+      await finalizeSuccessfulQueueJob(queueJob, tx.hash);
+
+    } catch (blockchainError) {
+      console.error(`[QUEUE ENGINE ERROR] Processing failure encountered on task ID ${queueJob.id}:`, blockchainError.message);
+      
+      // Rollback internal metrics so tasks do not log dead locks permanently
+      await supabase.from("syntrix_payout_queue").update({ 
+        status: "failed", 
+        error_message: blockchainError.message,
+        processed_at: new Date().toISOString()
+      }).eq("id", queueJob.id);
+
+      // Reset local tokens to historical entry baselines
+      if (queueJob.claim_token.startsWith("SURVEY-LAZY-")) {
+        await supabase.from("syntrix_claims").update({ status: "pending" }).eq("email", queueJob.email);
+      } else {
+        await supabase.from("syntrix_rewards").update({ status: "pending" }).eq("claim_token", queueJob.claim_token);
+      }
+    }
+
+  } catch (engineError) {
+    console.error("[QUEUE ENGINE ENGINE FAILURE CORE CRASH]:", engineError.message);
+  } finally {
+    isQueueProcessing = false;
+  }
+}
+
+// Master Ledger Finalization Query Block Setup
+async function finalizeSuccessfulQueueJob(job, txHash) {
+  await supabase.from("syntrix_payout_queue").update({
+    status: "success",
+    tx_hash: txHash,
+    processed_at: new Date().toISOString()
+  }).eq("id", job.id);
+
+  if (job.claim_token.startsWith("SURVEY-LAZY-")) {
+    await supabase.from("syntrix_claims").update({ wallet_address: job.wallet_address, tx_hash: txHash, status: "success" }).eq("email", job.email);
+  } else {
+    await supabase.from("syntrix_rewards").update({ tx_hash: txHash, claimed_wallet: job.wallet_address, claimed_at: new Date().toISOString(), status: "claimed" }).eq("claim_token", job.claim_token);
+    
+    // Keep downstream referral logging structures fully linked up
+    await supabase.from("syntrix_referrals").update({ status: "claimed" }).eq("claim_token", job.claim_token);
+    await supabase.from("syntrix_claims").update({ wallet_address: job.wallet_address, tx_hash: txHash, status: "success" }).eq("email", job.email);
+  }
+  console.log(`[QUEUE ENGINE] Successfully processed and finalized payout records for: ${job.email}`);
+}
+
+// Tick loop tracking clock configurations set to execute every 15 seconds sequentially
+setInterval(addUniqueThreadGuard, 15000);
+function addUniqueThreadGuard() {
+  processPayoutQueueEngine().catch(err => console.error("Thread system leak caught:", err.message));
+}
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
