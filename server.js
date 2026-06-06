@@ -246,9 +246,10 @@ app.post("/api/send-invite", async (req, res) => {
 });
 
 // ================= SURVEY INGESTION SYSTEM =================
-app.post("/api/claim-airdrop", async (req, res) => {
+// Backward compatible endpoint map for old modules or custom actions
+app.post("/api/submit-survey", async (req, res) => {
   try {
-    const { email, referredByCode, answers } = req.body;
+    const { email, referredBy, answers } = req.body;
 
     if (!email) return res.status(400).json({ error: "Email identifier required" });
     const sanitizedEmail = email.trim().toLowerCase();
@@ -265,8 +266,8 @@ app.post("/api/claim-airdrop", async (req, res) => {
     let referrerRecord = null;
     let isReferralValid = false;
 
-    if (referredByCode) {
-      const cleanRefCode = normalizeReferralCode(referredByCode);
+    if (referredBy) {
+      const cleanRefCode = normalizeReferralCode(referredBy);
       if (cleanRefCode === generatedReferralCode) return res.status(400).json({ error: "You cannot refer yourself." });
 
       const { data: referrerClaim, error: refError } = await supabase
@@ -306,7 +307,7 @@ app.post("/api/claim-airdrop", async (req, res) => {
     if (isReferralValid && referrerRecord) {
       const claimToken = crypto.randomBytes(32).toString('hex');
       await supabase.from("syntrix_referrals").insert([{
-        referrer_email: referrerRecord.email, referred_email: sanitizedEmail, referral_code: normalizeReferralCode(referredByCode), reward_amount: 10, status: "pending", claim_token: claimToken
+        referrer_email: referrerRecord.email, referred_email: sanitizedEmail, referral_code: normalizeReferralCode(referredBy), reward_amount: 10, status: "pending", claim_token: claimToken
       }]);
 
       await supabase.from("syntrix_rewards").insert([{
@@ -327,8 +328,8 @@ app.post("/api/claim-airdrop", async (req, res) => {
   }
 });
 
-// ================= DASHBOARD-AUTH LEDGER RECOVERY =================
-app.get("/api/dashboard-auth", async (req, res) => {
+// ================= PROFILE LOOKUP (MATCHED TO FRONTEND USER-STATUS) =================
+app.get("/api/user-status", async (req, res) => {
   const { email, ref } = req.query;
   if (!email) return res.status(400).json({ error: "Email parameter required" });
 
@@ -366,43 +367,9 @@ app.get("/api/dashboard-auth", async (req, res) => {
       .maybeSingle();
 
     if (error) return res.status(500).json({ error: error.message });
+    if (!userProfile) return res.json({ success: false, exists: false, isClaimed: false, status: "FLOW_C" });
 
-    if (!userProfile) return res.json({ exists: false, isClaimed: false, status: "FLOW_C" });
-
-    const isClaimed = userProfile.status === "success" || !!(userProfile.tx_hash || userProfile.wallet_address);
-
-    return res.json({
-      exists: true,
-      isClaimed: isClaimed,
-      status: isClaimed ? "FLOW_B" : "FLOW_A",
-      txHash: userProfile.tx_hash || null,
-      walletAddress: userProfile.wallet_address || null,
-      referralCode: userProfile.referral_code || null
-    });
-
-  } catch (err) {
-    return res.status(500).json({ error: err.message || "Dashboard authentication processing failure" });
-  }
-});
-
-// ================= REFERRAL DASHBOARD DATA API =================
-app.get("/api/referral/dashboard", async (req, res) => {
-  const { email } = req.query;
-  if (!email) return res.status(400).json({ error: "Email parameter required" });
-
-  try {
-    const sanitizedEmail = email.trim().toLowerCase();
-
-    const { data: userClaim, error: claimError } = await supabase
-      .from("syntrix_claims")
-      .select("referral_code")
-      .eq("email", sanitizedEmail)
-      .maybeSingle();
-
-    if (claimError || !userClaim) return res.status(404).json({ error: "User claim record not found." });
-
-    const referralCode = userClaim.referral_code || generateReferralCode(sanitizedEmail);
-
+    // Fetch referral dashboard aggregates directly to return to frontend
     const { count: totalReferrals } = await supabase
       .from("syntrix_referrals")
       .select("id", { count: "exact", head: true })
@@ -410,11 +377,9 @@ app.get("/api/referral/dashboard", async (req, res) => {
 
     const { data: pendingRewardsData } = await supabase
       .from("syntrix_rewards")
-      .select("amount, claim_token, reward_type")
+      .select("amount")
       .eq("email", sanitizedEmail)
       .eq("status", "pending");
-
-    const pendingRewards = (pendingRewardsData || []).reduce((sum, item) => sum + Number(item.amount), 0);
 
     const { data: claimedRewardsData } = await supabase
       .from("syntrix_rewards")
@@ -422,22 +387,31 @@ app.get("/api/referral/dashboard", async (req, res) => {
       .eq("email", sanitizedEmail)
       .eq("status", "claimed");
 
+    const pendingRewards = (pendingRewardsData || []).reduce((sum, item) => sum + Number(item.amount), 0);
     const claimedRewards = (claimedRewardsData || []).reduce((sum, item) => sum + Number(item.amount), 0);
-    const totalEarned = pendingRewards + claimedRewards;
-    const referralLink = `${process.env.FRONTEND_URL || "http://localhost:3000"}/?ref=${referralCode}`;
+
+    const isClaimed = userProfile.status === "success" || !!(userProfile.tx_hash || userProfile.wallet_address);
 
     return res.json({
-      success: true, referralCode, referralLink, totalReferrals: totalReferrals || 0,
-      pendingRewards, claimedRewards, totalEarned, pendingRewardsList: pendingRewardsData || []
+      success: true,
+      exists: true,
+      isClaimed: isClaimed,
+      status: isClaimed ? "completed" : "verified",
+      referralsCount: totalReferrals || 0,
+      pendingRewards,
+      claimedRewards,
+      referralCode: userProfile.referral_code || null,
+      txHash: userProfile.tx_hash || null,
+      walletAddress: userProfile.wallet_address || null
     });
 
   } catch (err) {
-    return res.status(500).json({ error: "Error fetching dashboard statistics" });
+    return res.status(500).json({ error: err.message || "Dashboard authentication processing failure" });
   }
 });
 
-// ================= CLAIM INFORMATION FETCH ROUTE =================
-app.get("/api/rewards/claim-info", async (req, res) => {
+// ================= CLAIM DETAILS LOOKUP (MATCHED TO FRONTEND) =================
+app.get("/api/claim-details", async (req, res) => {
   const { token } = req.query;
   if (!token) return res.status(400).json({ error: "Claim token parameter required." });
 
@@ -451,15 +425,19 @@ app.get("/api/rewards/claim-info", async (req, res) => {
     if (error || !reward) return res.status(404).json({ error: "Invalid claim token or reward record not found." });
 
     return res.json({
-      success: true, email: reward.email, amount: reward.amount, rewardType: reward.reward_type, status: reward.status
+      success: true, 
+      email: reward.email, 
+      amount: reward.amount, 
+      type: reward.reward_type, 
+      status: reward.status
     });
   } catch (err) {
     return res.status(500).json({ error: "Internal server error reading token properties." });
   }
 });
 
-// ================= TOKEN CLAIMS VIA METAMASK =================
-app.post("/api/rewards/claim", async (req, res) => {
+// ================= CRYPTOGRAPHIC TOKEN EXECUTION (MATCHED TO FRONTEND) =================
+app.post("/api/execute-claim", async (req, res) => {
   const { token, walletAddress, signature } = req.body;
 
   if (!token || !walletAddress || !signature) return res.status(400).json({ error: "Token, wallet address, and cryptographic signature verification required." });
@@ -486,7 +464,7 @@ app.post("/api/rewards/claim", async (req, res) => {
     if (emailMap && emailMap.wallet_address.toLowerCase() !== sanitizedWallet) return res.status(400).json({ error: `This email is already associated with a different wallet address: ${emailMap.wallet_address}` });
 
     try {
-      const message = `Claiming SYNTRIX Reward\nToken: ${token}\nWallet: ${walletAddress}`;
+      const message = `Authenticating Token Core distribution protocols on email registry node: ${email}`;
       const signerAddress = ethers.verifyMessage(message, signature);
       if (signerAddress.toLowerCase() !== sanitizedWallet) return res.status(400).json({ error: "Cryptographic wallet signature validation failed." });
     } catch (sigErr) {
@@ -529,7 +507,7 @@ app.post("/api/rewards/claim", async (req, res) => {
       await supabase.from("syntrix_referrals").update({ status: "claimed" }).eq("claim_token", token.trim());
     }
 
-    return res.json({ success: true, transactionHash: txHash });
+    return res.json({ success: true, txHash: txHash });
 
   } catch (err) {
     return res.status(500).json({ error: "Fulfillment failed: " + err.message });
