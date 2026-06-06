@@ -8,7 +8,13 @@ const { ethers } = require("ethers");
 
 const app = express();
 
-app.use(cors());
+// ================= COORD ADJUSTMENTS (CORS & HEADERS) =================
+// Fully opens the gateway pipeline so your frontend never triggers a network offline drop
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key"]
+}));
 app.use(express.json({ limit: "2mb" }));
 
 // ================= MEMORY OPTIMIZATION & TIMEOUT GUARD =================
@@ -69,8 +75,6 @@ async function sendEmailHTTP(toEmail, subject, htmlContent) {
       "content-type": "application/json"
     },
     body: JSON.stringify({
-      // THE FIXED SENDER LOOKUP: Pointing to your verified sender email account profile.
-      // Brevo will auto-wrap this in its secure tracking mask so Google passes it smoothly!
       sender: { 
         name: SENDER_NAME, 
         email: "syntrix.care@gmail.com" 
