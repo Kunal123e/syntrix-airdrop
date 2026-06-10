@@ -135,7 +135,7 @@ async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
   `;
 
   try {
-    await sendEmailHTTP(referrerEmail, "🎁 You Earned 10 SYNTRIX Tokens", htmlBody);
+    await sendEmailHTTP(referrerEmail, `🎁 You Earned ${rewardAmount} SYNTRIX Tokens`, htmlBody);
     console.log(`Notification email sent via API to referrer: ${referrerEmail}`);
     return true;
   } catch (error) {
@@ -290,10 +290,11 @@ app.post("/api/submit-survey", async (req, res) => {
       isReferralValid = true;
     }
 
+    // UPDATE: Survey completion now grants 56 tokens
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([{
-        email: sanitizedEmail, amount_rewarded: 10, status: "pending", referral_code: generatedReferralCode, survey_data: answers 
+        email: sanitizedEmail, amount_rewarded: 56, status: "pending", referral_code: generatedReferralCode, survey_data: answers 
       }])
       .select("id, email, status, wallet_address")
       .single();
@@ -305,6 +306,7 @@ app.post("/api/submit-survey", async (req, res) => {
 
     if (isReferralValid && referrerRecord) {
       const claimToken = crypto.randomBytes(32).toString('hex');
+      // Referrals remain at 10 tokens
       await supabase.from("syntrix_referrals").insert([{
         referrer_email: referrerRecord.email, referred_email: sanitizedEmail, referral_code: normalizeReferralCode(referredBy), reward_amount: 10, status: "pending", claim_token: claimToken
       }]);
@@ -361,7 +363,7 @@ app.get("/api/user-status", async (req, res) => {
 
     const { data: userProfile, error } = await supabase
       .from("syntrix_claims")
-      .select("email, status, wallet_address, tx_hash, referral_code")
+      .select("email, status, wallet_address, tx_hash, referral_code, amount_rewarded")
       .eq("email", sanitizedEmail)
       .maybeSingle();
 
@@ -386,6 +388,15 @@ app.get("/api/user-status", async (req, res) => {
     const { data: rewards } = await supabase.from("syntrix_rewards").select("amount, status").eq("email", sanitizedEmail);
 
     let pendingRewards = 0, claimedRewards = 0;
+    
+    // Check survey claim status
+    const surveyAmount = userProfile.amount_rewarded || 56;
+    if (userProfile.status === "pending" || userProfile.status === "processing") {
+      pendingRewards += Number(surveyAmount);
+    } else if (userProfile.status === "success") {
+      claimedRewards += Number(surveyAmount);
+    }
+    
     if (rewards) {
       rewards.forEach(r => {
         if (r.status === "pending" || r.status === "processing") pendingRewards += Number(r.amount);
@@ -511,7 +522,7 @@ app.post("/api/claim-reward", async (req, res) => {
     const sanitizedEmail = email.trim().toLowerCase();
     const sanitizedWallet = walletAddress.trim().toLowerCase();
 
-    const { data: userRecord } = await supabase.from("syntrix_claims").select("id, status, tx_hash").eq("email", sanitizedEmail).maybeSingle();
+    const { data: userRecord } = await supabase.from("syntrix_claims").select("id, status, tx_hash, amount_rewarded").eq("email", sanitizedEmail).maybeSingle();
     if (!userRecord) return res.status(404).json({ error: "User survey verification profile not found." });
     if (userRecord.status === "success" || userRecord.tx_hash) return res.status(400).json({ error: "Rewards have already been successfully distributed to this email." });
 
@@ -524,11 +535,12 @@ app.post("/api/claim-reward", async (req, res) => {
     const { data: duplicateWallet } = await supabase.from("syntrix_claims").select("id").eq("wallet_address", sanitizedWallet).maybeSingle();
     if (duplicateWallet) return res.status(400).json({ error: "This wallet address has already been used to claim a survey reward." });
 
-    // Push standard survey completions to the processing queue table as well!
+    // UPDATE: Ensure the queue job references the 56 token reward
+    const rewardAmount = userRecord.amount_rewarded || 56;
     await supabase.from("syntrix_payout_queue").insert([{
       email: sanitizedEmail,
       wallet_address: sanitizedWallet,
-      reward_amount: 10,
+      reward_amount: rewardAmount,
       claim_token: `SURVEY-LAZY-${crypto.randomBytes(8).toString('hex').toUpperCase()}`,
       status: "queued"
     }]);
