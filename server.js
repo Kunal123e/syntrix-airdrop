@@ -290,18 +290,18 @@ app.post("/api/submit-survey", async (req, res) => {
       isReferralValid = true;
     }
 
-    // UPDATE: Survey completion now grants 56 tokens
+    // 🚀 FIXED: Survey completion amount_rewarded updated from 56 to 48 tokens
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([{
-        email: sanitizedEmail, amount_rewarded: 56, status: "pending", referral_code: generatedReferralCode, survey_data: answers 
+        email: sanitizedEmail, amount_rewarded: 48, status: "pending", referral_code: generatedReferralCode, survey_data: answers 
       }])
       .select("id, email, status, wallet_address")
       .single();
 
     if (claimError) {
       if (claimError.code === "23505") return res.status(400).json({ error: "This email has already submitted the survey." });
-      return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
+      return Res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
     }
 
     if (isReferralValid && referrerRecord) {
@@ -389,8 +389,8 @@ app.get("/api/user-status", async (req, res) => {
 
     let pendingRewards = 0, claimedRewards = 0;
     
-    // Check survey claim status
-    const surveyAmount = userProfile.amount_rewarded || 56;
+    // 🚀 FIXED: Default baseline reward updated from 56 to 48 dynamically 
+    const surveyAmount = userProfile.amount_rewarded || 48;
     if (userProfile.status === "pending" || userProfile.status === "processing") {
       pendingRewards += Number(surveyAmount);
     } else if (userProfile.status === "success") {
@@ -535,8 +535,8 @@ app.post("/api/claim-reward", async (req, res) => {
     const { data: duplicateWallet } = await supabase.from("syntrix_claims").select("id").eq("wallet_address", sanitizedWallet).maybeSingle();
     if (duplicateWallet) return res.status(400).json({ error: "This wallet address has already been used to claim a survey reward." });
 
-    // UPDATE: Ensure the queue job references the 56 token reward
-    const rewardAmount = userRecord.amount_rewarded || 56;
+    // 🚀 FIXED: Lazy reward fallback value updated from 56 to 48
+    const rewardAmount = userRecord.amount_rewarded || 48;
     await supabase.from("syntrix_payout_queue").insert([{
       email: sanitizedEmail,
       wallet_address: sanitizedWallet,
