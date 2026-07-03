@@ -241,6 +241,13 @@ app.post("/api/send-invite", async (req, res) => {
   }
 });
 
+// ================= DYNAMIC QR REDIRECTOR =================
+app.get("/r/:refCode", (req, res) => {
+  const refCode = req.params.refCode;
+  const targetDomain = process.env.FRONTEND_URL || "https://syntrix-airdrop.onrender.com"; 
+  res.redirect(302, `${targetDomain}/?ref=${refCode}`);
+});
+
 // ================= SURVEY INGESTION SYSTEM (QUALITY GATE SECURED) =================
 app.post("/api/submit-survey", async (req, res) => {
   try {
