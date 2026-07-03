@@ -251,7 +251,7 @@ app.get("/r/:refCode", (req, res) => {
 // ================= SURVEY INGESTION SYSTEM (QUALITY GATE SECURED) =================
 app.post("/api/submit-survey", async (req, res) => {
   try {
-    const { email, referredBy, answers, startTime, submissionTime } = req.body;
+    const { email, referredBy, answers, startTime, submissionTime, assignedBadge } = req.body;
 
     // 🚀 STRICT SERVER-SIDE QUALITY CHECK: 120,000ms = 2 Minutes
     if (!startTime || !submissionTime) {
@@ -302,7 +302,7 @@ app.post("/api/submit-survey", async (req, res) => {
       isReferralValid = true;
     }
 
-    // 🚀 FIXED: Survey completion amount_rewarded updated, and duration saved to Supabase
+    // 🚀 FIXED: Survey completion amount_rewarded updated, and duration + badges saved to Supabase
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([{
@@ -311,7 +311,8 @@ app.post("/api/submit-survey", async (req, res) => {
         status: "pending", 
         referral_code: generatedReferralCode, 
         survey_data: answers,
-        survey_duration_seconds: Math.floor(timeTaken / 1000) // 🚀 Metrics saved directly to Supabase
+        survey_duration_seconds: Math.floor(timeTaken / 1000), // 🚀 Metrics saved directly to Supabase
+        assigned_badge: assignedBadge || "Analyzer" // 🚀 Badges saved directly to Supabase
       }])
       .select("id, email, status, wallet_address")
       .single();
@@ -380,7 +381,7 @@ app.get("/api/user-status", async (req, res) => {
 
     const { data: userProfile, error } = await supabase
       .from("syntrix_claims")
-      .select("email, status, wallet_address, tx_hash, referral_code, amount_rewarded")
+      .select("email, status, wallet_address, tx_hash, referral_code, amount_rewarded, assigned_badge")
       .eq("email", sanitizedEmail)
       .maybeSingle();
 
@@ -436,7 +437,8 @@ app.get("/api/user-status", async (req, res) => {
       claimedRewards,
       referralCode: userProfile.referral_code || null,
       txHash: userProfile.tx_hash || (queuedItems ? queuedItems.tx_hash : null),
-      walletAddress: userProfile.wallet_address || null
+      walletAddress: userProfile.wallet_address || null,
+      badge: userProfile.assigned_badge || "Analyzer"
     });
 
   } catch (err) {
