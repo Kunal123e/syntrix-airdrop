@@ -5,6 +5,7 @@ const cors = require("cors");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 const { ethers } = require("ethers");
+const { GoogleGenAI } = require("@google/genai"); // Added for AI Verification Engine
 
 const app = express();
 
@@ -15,7 +16,10 @@ app.use(cors({
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key"]
 }));
-app.use(express.json({ limit: "2mb" }));
+
+// STRICT RULE APPLIED: Limit boosted to 20mb to prevent Base64 expansion payload crash
+app.use(express.json({ limit: "20mb" }));
+app.use(express.urlencoded({ limit: "20mb", extended: true }));
 
 // ================= MEMORY OPTIMIZATION & TIMEOUT GUARD =================
 app.use((req, res, next) => {
@@ -30,7 +34,7 @@ app.use((req, res, next) => {
 // ================= SUPABASE CLIENT =================
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE
+  process.env.SUPABASE_SERVICE_ROLE // Explicit service role matching dashboard
 );
 
 // ================= POLYGON CONFIGURATION =================
@@ -669,6 +673,163 @@ setInterval(addUniqueThreadGuard, 15000);
 function addUniqueThreadGuard() {
   processPayoutQueueEngine().catch(err => console.error("Thread system leak caught:", err.message));
 }
+
+// ================= DOCUMENT MODE: WAITING ROOM INGESTION & TEMPORAL RATE LIMITING =================
+app.post("/api/upload-task", async (req, res) => {
+  const { userEmail, taskType, fileName, imageBase64 } = req.body;
+
+  if (!userEmail || !taskType || !fileName || !imageBase64) {
+    return res.status(400).json({ error: "Missing required document fields." });
+  }
+
+  const sanitizedEmail = userEmail.trim().toLowerCase();
+
+  try {
+    // 🛡️ Temporal Rate Limiting Check (Only for 'selfie' tasks)
+    if (taskType === "selfie") {
+      const startOfMonth = new Date();
+      startOfMonth.setDate(1);
+      startOfMonth.setHours(0, 0, 0, 0);
+
+      const { count, error: countError } = await supabase
+        .from("syntrix_submissions")
+        .select("*", { count: "exact", head: true })
+        .eq("email", sanitizedEmail)
+        .eq("task_type", "selfie")
+        .gte("created_at", startOfMonth.toISOString());
+
+      if (countError) throw countError;
+
+      if (count >= 3) {
+        return res.status(403).json({ error: "Monthly limit reached. Come back next month!" });
+      }
+    }
+
+    // Insert payload into the Postgres Waiting Room as a pending text block
+    const { error } = await supabase.from("syntrix_submissions").insert([{
+      email: sanitizedEmail,
+      task_type: taskType,
+      file_name: fileName,
+      temp_base64: imageBase64,
+      status: "pending"
+    }]);
+
+    if (error) throw error;
+
+    return res.json({ success: true, message: "Queued for Verification" });
+  } catch (err) {
+    return res.status(500).json({ error: "Waiting room ingestion failed: " + err.message });
+  }
+});
+
+// ================= DOCUMENT MODE: BACKGROUND AI WORKER (THE 60-SEC CRON LOOP) =================
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+let isTaskProcessing = false;
+
+async function processTaskQueueEngine() {
+  if (isTaskProcessing) return;
+  isTaskProcessing = true;
+
+  try {
+    // Extract up to 10 pending documents sequentially
+    const { data: jobs, error } = await supabase
+      .from("syntrix_submissions")
+      .select("*")
+      .eq("status", "pending")
+      .limit(10);
+
+    if (error || !jobs || jobs.length === 0) {
+      isTaskProcessing = false;
+      return;
+    }
+
+    for (const job of jobs) {
+      try {
+        // Strip header from Base64 string before feeding to AI models
+        const base64Data = job.temp_base64.replace(/^data:(image|application)\/\w+;base64,/, "");
+
+        // ================= HACK 1: VECTOR SHIELD =================
+        const embedRes = await ai.models.embedContent({
+          model: "gemini-embedding-2-flash",
+          contents: [{ inlineData: { data: base64Data, mimeType: "image/jpeg" } }]
+        });
+        const embedding = embedRes.embeddings[0].values;
+
+        // Perform similarity query against existing repository vectors
+        const { data: matchData } = await supabase.rpc("match_homework_vectors", {
+          query_embedding: embedding
+        });
+
+        if (matchData && matchData.length > 0) {
+          // Lock record as duplicate, and AGGRESSIVELY PURGE base64 text payload from database
+          await supabase.from("syntrix_submissions")
+            .update({ status: "duplicate", temp_base64: null })
+            .eq("id", job.id);
+          continue;
+        }
+
+        // ================= HACK 2: LIVENESS CHECK =================
+        const livenessPrompt = job.task_type === "selfie" 
+          ? "Analyze this image. Is it a real photo of a physical human face, or is it a photo of a digital screen/fake? Answer strictly with the word REAL or FAKE."
+          : "Analyze this image. Is it a real physical paper document, or is it a photo of a digital screen/fake? Answer strictly with the word REAL or FAKE.";
+
+        const livenessRes = await ai.models.generateContent({
+          model: "gemini-1.5-flash",
+          contents: [
+            livenessPrompt,
+            { inlineData: { data: base64Data, mimeType: "image/jpeg" } }
+          ]
+        });
+        const livenessText = livenessRes.text().trim().toUpperCase();
+
+        if (livenessText.includes("FAKE")) {
+          // Lock record as fraud, and AGGRESSIVELY PURGE base64 text payload from database
+          await supabase.from("syntrix_submissions")
+            .update({ status: "fraud", temp_base64: null })
+            .eq("id", job.id);
+          continue;
+        }
+
+        // ================= FINAL COMMIT =================
+        const buffer = Buffer.from(base64Data, "base64");
+        const storagePath = `${job.email}/${Date.now()}_${job.file_name}`;
+        
+        // Push final physical image into verified bucket tier
+        const { error: uploadError } = await supabase.storage
+          .from("verified_assets")
+          .upload(storagePath, buffer, { contentType: "image/jpeg" });
+
+        if (uploadError) throw uploadError;
+
+        const { data: publicUrlData } = supabase.storage
+          .from("verified_assets")
+          .getPublicUrl(storagePath);
+
+        // Terminate record process: mark verified, link URL, lock vector, grant 48 SYNX, and DELETE base64 block
+        await supabase.from("syntrix_submissions")
+          .update({
+            status: "verified",
+            temp_base64: null, 
+            storage_url: publicUrlData.publicUrl,
+            image_embedding: embedding,
+            reward_amount: 48 
+          })
+          .eq("id", job.id);
+
+      } catch (jobErr) {
+        console.error(`[AI WORKER ERROR] Job ${job.id}:`, jobErr.message);
+      }
+    }
+  } catch (engineError) {
+    console.error("[TASK WORKER CRASH]:", engineError.message);
+  } finally {
+    isTaskProcessing = false;
+  }
+}
+
+// Spin up the background 60-second cron cycle
+setInterval(processTaskQueueEngine, 60000);
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
