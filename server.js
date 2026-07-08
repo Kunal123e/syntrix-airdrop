@@ -731,12 +731,13 @@ async function processTaskQueueEngine() {
   isTaskProcessing = true;
 
   try {
-    // Extract up to 10 pending documents sequentially
+    // 1. Extract exactly 1 pending document sequentially to prevent race conditions
     const { data: jobs, error } = await supabase
       .from("syntrix_submissions")
       .select("*")
       .eq("status", "pending")
-      .limit(10);
+      .order('created_at', { ascending: true })
+      .limit(1);
 
     if (error || !jobs || jobs.length === 0) {
       isTaskProcessing = false;
@@ -748,49 +749,90 @@ async function processTaskQueueEngine() {
         // Strip header from Base64 string before feeding to AI models
         const base64Data = job.temp_base64.replace(/^data:(image|application)\/\w+;base64,/, "");
 
-        // ================= HACK 1: VECTOR SHIELD =================
+        // 2. DAILY QUOTA CHECK (Ignores rejected/fraud items from limit)
+        if (job.task_type === 'selfie') {
+          const today = new Date().toISOString().split('T')[0];
+          const { count: dailyCount } = await supabase
+            .from('syntrix_submissions')
+            .select('*', { count: 'exact', head: true })
+            .eq('email', job.email)
+            .eq('task_type', 'selfie')
+            .in('status', ['pending', 'approved', 'verified'])
+            .gte('created_at', today);
+
+          if (dailyCount > 1) { // Assuming 1 per day limit
+             await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'Daily limit reached', temp_base64: null }).eq('id', job.id);
+             continue;
+          }
+        }
+
+        // 3. 🚀 THE COMBINED PII & QUALITY BOUNCER
+        const qualityRules = job.task_type === 'selfie' 
+          ? 'Is it a clear, authentic photograph of a real human face?' 
+          : `Is this an authentic photo of physical, handwritten notes containing: ${job.contentTags || 'academic content'}? Reject PDFs, screenshots, printed textbook text, or blank pages.`;
+
+        const combinedPrompt = `You are a strict security and academic AI validator. Evaluate this image for TWO criteria:
+        
+        1. QUALITY: ${qualityRules}
+        2. PII (Privacy Check): Analyze this image of handwritten academic notes or photos. Does this image contain Sensitive Personal Identifiable Information (PII) belonging to the author, such as a signature, a full legal name at the top of the page, a personal phone number, or a physical address? Ignore historical names, names used in math word problems, or textbook citations.
+
+        You MUST respond STRICTLY with a valid JSON object matching this format, with no other text or markdown:
+        {"quality_pass": true, "contains_pii": false}`;
+
+        console.log(`Processing Task UUID: ${job.id} | Checking Quality & PII...`);
+        
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.5-flash',
+          contents: [combinedPrompt, { inlineData: { mimeType: 'image/jpeg', data: base64Data } }]
+        });
+
+        // 4. PARSE JSON VERDICT
+        let aiVerdict;
+        try {
+          const cleanJsonStr = response.text().replace(/```json/gi, "").replace(/```/g, "").trim();
+          aiVerdict = JSON.parse(cleanJsonStr);
+        } catch (parseErr) {
+          console.error("Failed to parse Gemini JSON:", response.text());
+          await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'AI parsing failure', temp_base64: null }).eq('id', job.id);
+          continue;
+        }
+
+        console.log(`AI Verdict for ${job.id}:`, aiVerdict);
+
+        // 5. STATUS ROUTER
+        if (aiVerdict.contains_pii === true) {
+           await supabase.from('syntrix_submissions').update({ status: 'rejected_pii', reason: 'Contains Sensitive PII', temp_base64: null }).eq('id', job.id);
+           console.log(`Task ${job.id} REJECTED: Contains PII.`);
+           continue;
+        }
+
+        if (aiVerdict.quality_pass === false) {
+           await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'Failed AI quality guidelines', temp_base64: null }).eq('id', job.id);
+           console.log(`Task ${job.id} REJECTED: Poor Quality.`);
+           continue;
+        }
+
+        // 6. VECTOR DUPLICATE SHIELD
         const embedRes = await ai.models.embedContent({
-          model: "gemini-embedding-2-flash",
+          model: "gemini-embedding-2",
           contents: [{ inlineData: { data: base64Data, mimeType: "image/jpeg" } }]
         });
         const embedding = embedRes.embeddings[0].values;
 
         // Perform similarity query against existing repository vectors
         const { data: matchData } = await supabase.rpc("match_homework_vectors", {
-          query_embedding: embedding
+          query_embedding: embedding,
+          match_threshold: 0.98,
+          match_count: 1
         });
 
         if (matchData && matchData.length > 0) {
-          // Lock record as duplicate, and AGGRESSIVELY PURGE base64 text payload from database
-          await supabase.from("syntrix_submissions")
-            .update({ status: "duplicate", temp_base64: null })
-            .eq("id", job.id);
+          await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate image detected", temp_base64: null }).eq("id", job.id);
+          console.log(`Task ${job.id} REJECTED: Duplicate Fraud.`);
           continue;
         }
 
-        // ================= HACK 2: LIVENESS CHECK =================
-        const livenessPrompt = job.task_type === "selfie" 
-          ? "Analyze this image. Is it a real photo of a physical human face, or is it a photo of a digital screen/fake? Answer strictly with the word REAL or FAKE."
-          : "Analyze this image. Is it a real physical paper document, or is it a photo of a digital screen/fake? Answer strictly with the word REAL or FAKE.";
-
-        const livenessRes = await ai.models.generateContent({
-          model: "gemini-1.5-flash",
-          contents: [
-            livenessPrompt,
-            { inlineData: { data: base64Data, mimeType: "image/jpeg" } }
-          ]
-        });
-        const livenessText = livenessRes.text().trim().toUpperCase();
-
-        if (livenessText.includes("FAKE")) {
-          // Lock record as fraud, and AGGRESSIVELY PURGE base64 text payload from database
-          await supabase.from("syntrix_submissions")
-            .update({ status: "fraud", temp_base64: null })
-            .eq("id", job.id);
-          continue;
-        }
-
-        // ================= FINAL COMMIT =================
+        // 7. FINAL COMMIT TO BUCKET
         const buffer = Buffer.from(base64Data, "base64");
         const storagePath = `${job.email}/${Date.now()}_${job.file_name}`;
         
@@ -811,10 +853,18 @@ async function processTaskQueueEngine() {
             status: "verified",
             temp_base64: null, 
             storage_url: publicUrlData.publicUrl,
-            image_embedding: embedding,
+            embedding: embedding,
             reward_amount: 48 
           })
           .eq("id", job.id);
+
+        // Reward Allocation (User Table)
+        const { data: userData } = await supabase.from('users').select('pendingRewards').eq('email', job.email).single();
+        if(userData) {
+          await supabase.from('users').update({ pendingRewards: (userData.pendingRewards || 0) + 48 }).eq('email', job.email);
+        }
+        
+        console.log(`Task ${job.id} VERIFIED. 48 Tokens awarded.`);
 
       } catch (jobErr) {
         console.error(`[AI WORKER ERROR] Job ${job.id}:`, jobErr.message);
