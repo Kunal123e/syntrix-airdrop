@@ -306,7 +306,6 @@ app.post("/api/submit-survey", async (req, res) => {
       isReferralValid = true;
     }
 
-    // 🚀 FIXED: Survey completion amount_rewarded updated, and duration + badges saved to Supabase
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([{
@@ -315,8 +314,8 @@ app.post("/api/submit-survey", async (req, res) => {
         status: "pending", 
         referral_code: generatedReferralCode, 
         survey_data: answers,
-        survey_duration_seconds: Math.floor(timeTaken / 1000), // 🚀 Metrics saved directly to Supabase
-        assigned_badge: assignedBadge || "Analyzer" // 🚀 Badges saved directly to Supabase
+        survey_duration_seconds: Math.floor(timeTaken / 1000), 
+        assigned_badge: assignedBadge || "Analyzer" 
       }])
       .select("id, email, status, wallet_address")
       .single();
@@ -328,7 +327,6 @@ app.post("/api/submit-survey", async (req, res) => {
 
     if (isReferralValid && referrerRecord) {
       const claimToken = crypto.randomBytes(32).toString('hex');
-      // Referrals remain at 10 tokens
       await supabase.from("syntrix_referrals").insert([{
         referrer_email: referrerRecord.email, referred_email: sanitizedEmail, referral_code: normalizeReferralCode(referredBy), reward_amount: 10, status: "pending", claim_token: claimToken
       }]);
@@ -391,7 +389,6 @@ app.get("/api/user-status", async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
     
-    // Check if they have an active task sitting inside our queue table
     const { data: queuedItems } = await supabase.from("syntrix_payout_queue")
       .select("status, tx_hash")
       .eq("email", sanitizedEmail)
@@ -401,7 +398,6 @@ app.get("/api/user-status", async (req, res) => {
 
     if (!userProfile) return res.json({ success: false, exists: false, isClaimed: false, status: "FLOW_C" });
 
-    // Fetch referral dashboard aggregates directly to return to frontend
     const { count: totalReferrals } = await supabase
       .from("syntrix_referrals")
       .select("id", { count: "exact", head: true })
@@ -409,9 +405,11 @@ app.get("/api/user-status", async (req, res) => {
 
     const { data: rewards } = await supabase.from("syntrix_rewards").select("amount, status").eq("email", sanitizedEmail);
 
+    // 🚀 NEW: Check actual users table for rewards
+    const { data: userTableRecord } = await supabase.from("users").select("pendingRewards, claimedRewards").eq("email", sanitizedEmail).maybeSingle();
+
     let pendingRewards = 0, claimedRewards = 0;
     
-    // 🚀 FIXED: Default baseline reward updated from 56 to 48 dynamically 
     const surveyAmount = userProfile.amount_rewarded || 48;
     if (userProfile.status === "pending" || userProfile.status === "processing") {
       pendingRewards += Number(surveyAmount);
@@ -426,7 +424,11 @@ app.get("/api/user-status", async (req, res) => {
       });
     }
 
-    // Evaluate live transactional states across dependencies
+    if (userTableRecord) {
+        pendingRewards += Number(userTableRecord.pendingRewards || 0);
+        claimedRewards += Number(userTableRecord.claimedRewards || 0);
+    }
+
     const isClaimed = userProfile.status === "success" || 
                       !!(userProfile.tx_hash || userProfile.wallet_address) ||
                       (queuedItems && queuedItems.status === "success");
@@ -511,11 +513,9 @@ app.post("/api/execute-claim", async (req, res) => {
       return res.status(400).json({ error: "Signature verification processing error: " + sigErr.message });
     }
 
-    // Stop duplicate queueing loops if hit concurrently
     const { data: itemInQueue } = await supabase.from("syntrix_payout_queue").select("id").eq("claim_token", token.trim()).maybeSingle();
     if (itemInQueue) return res.status(400).json({ error: "This distribution request is already queued for processing." });
 
-    // Instantly append items to the database transaction log array (Fast execution pathway!)
     await supabase.from("syntrix_payout_queue").insert([{
       email: email,
       wallet_address: sanitizedWallet,
@@ -524,7 +524,6 @@ app.post("/api/execute-claim", async (req, res) => {
       status: "queued"
     }]);
 
-    // Lock local database states immediately
     await supabase.from("syntrix_rewards").update({ status: "processing" }).eq("id", rewardRecord.id);
     if (!emailMap) await supabase.from("syntrix_wallets").upsert({ email: email, wallet_address: sanitizedWallet });
 
@@ -558,7 +557,6 @@ app.post("/api/claim-reward", async (req, res) => {
     const { data: duplicateWallet } = await supabase.from("syntrix_claims").select("id").eq("wallet_address", sanitizedWallet).maybeSingle();
     if (duplicateWallet) return res.status(400).json({ error: "This wallet address has already been used to claim a survey reward." });
 
-    // 🚀 FIXED: Lazy reward fallback value updated from 56 to 48
     const rewardAmount = userRecord.amount_rewarded || 48;
     await supabase.from("syntrix_payout_queue").insert([{
       email: sanitizedEmail,
@@ -584,7 +582,6 @@ async function processPayoutQueueEngine() {
   isQueueProcessing = true;
 
   try {
-    // Pick up exactly one oldest queued item sequentially
     const { data: queueJob, error } = await supabase.from("syntrix_payout_queue")
       .select("*")
       .eq("status", "queued")
@@ -599,24 +596,19 @@ async function processPayoutQueueEngine() {
     }
 
     console.log(`[QUEUE ENGINE] Processing job ID ${queueJob.id} for target recipient: ${queueJob.email}`);
-
-    // Set job state to processing immediately to preserve multi-threading barriers
     await supabase.from("syntrix_payout_queue").update({ status: "processing" }).eq("id", queueJob.id);
 
     if (!tokenContract) {
-      // Mock mode pipeline processing if private variables are unpopulated
       const mockTxHash = "0x" + crypto.randomBytes(32).toString("hex");
       await finalizeSuccessfulQueueJob(queueJob, mockTxHash);
       isQueueProcessing = false;
       return;
     }
 
-    // Real On-Chain Blockchain Payout Processing Node Array
     try {
       const decimals = await tokenContract.decimals();
       const amount = ethers.parseUnits(queueJob.reward_amount.toString(), decimals);
 
-      // Execute automated deduction/transfer from primary host wallet balance allocation
       const tx = await tokenContract.transfer(queueJob.wallet_address, amount);
       console.log(`[QUEUE ENGINE] Broadcasted transaction on-chain: ${tx.hash}. Waiting confirmation block metrics...`);
       
@@ -626,21 +618,18 @@ async function processPayoutQueueEngine() {
     } catch (blockchainError) {
       console.error(`[QUEUE ENGINE ERROR] Processing failure encountered on task ID ${queueJob.id}:`, blockchainError.message);
       
-      // Rollback internal metrics so tasks do not log dead locks permanently
       await supabase.from("syntrix_payout_queue").update({ 
         status: "failed", 
         error_message: blockchainError.message,
         processed_at: new Date().toISOString()
       }).eq("id", queueJob.id);
 
-      // Reset local tokens to historical entry baselines
       if (queueJob.claim_token.startsWith("SURVEY-LAZY-")) {
         await supabase.from("syntrix_claims").update({ status: "pending" }).eq("email", queueJob.email);
       } else {
         await supabase.from("syntrix_rewards").update({ status: "pending" }).eq("claim_token", queueJob.claim_token);
       }
     }
-
   } catch (engineError) {
     console.error("[QUEUE ENGINE ENGINE FAILURE CORE CRASH]:", engineError.message);
   } finally {
@@ -648,7 +637,6 @@ async function processPayoutQueueEngine() {
   }
 }
 
-// Master Ledger Finalization Query Block Setup
 async function finalizeSuccessfulQueueJob(job, txHash) {
   await supabase.from("syntrix_payout_queue").update({
     status: "success",
@@ -661,14 +649,12 @@ async function finalizeSuccessfulQueueJob(job, txHash) {
   } else {
     await supabase.from("syntrix_rewards").update({ tx_hash: txHash, claimed_wallet: job.wallet_address, claimed_at: new Date().toISOString(), status: "claimed" }).eq("claim_token", job.claim_token);
     
-    // Keep downstream referral logging structures fully linked up
     await supabase.from("syntrix_referrals").update({ status: "claimed" }).eq("claim_token", job.claim_token);
     await supabase.from("syntrix_claims").update({ wallet_address: job.wallet_address, tx_hash: txHash, status: "success" }).eq("email", job.email);
   }
   console.log(`[QUEUE ENGINE] Successfully processed and finalized payout records for: ${job.email}`);
 }
 
-// Tick loop tracking clock configurations set to execute every 15 seconds sequentially
 setInterval(addUniqueThreadGuard, 15000);
 function addUniqueThreadGuard() {
   processPayoutQueueEngine().catch(err => console.error("Thread system leak caught:", err.message));
@@ -676,7 +662,7 @@ function addUniqueThreadGuard() {
 
 // ================= DOCUMENT MODE: WAITING ROOM INGESTION & TEMPORAL RATE LIMITING =================
 app.post("/api/upload-task", async (req, res) => {
-  const { userEmail, taskType, fileName, imageBase64 } = req.body;
+  const { userEmail, taskType, fileName, imageBase64, contentTags } = req.body; // Added contentTags
 
   if (!userEmail || !taskType || !fileName || !imageBase64) {
     return res.status(400).json({ error: "Missing required document fields." });
@@ -711,132 +697,122 @@ app.post("/api/upload-task", async (req, res) => {
       task_type: taskType,
       file_name: fileName,
       temp_base64: imageBase64,
+      contentTags: contentTags,
       status: "pending"
     }]);
 
     if (error) throw error;
 
-    return res.json({ success: true, message: "Queued for Verification" });
+    res.json({ success: true, message: "Queued for Verification" });
+
+    // 🚀 IMMEDIATE TRIGGER FIX: Instantly fire the worker logic so users don't wait for the interval
+    processTaskQueueEngine();
+
   } catch (err) {
     return res.status(500).json({ error: "Waiting room ingestion failed: " + err.message });
   }
 });
 
-// ================= DOCUMENT MODE: BACKGROUND AI WORKER (THE 60-SEC CRON LOOP) =================
+// ================= NEW: UI POLLING ENDPOINT =================
+app.get("/api/check-submission", async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: "Email required" });
+
+  try {
+    const { data, error } = await supabase
+      .from("syntrix_submissions")
+      .select("status, reason")
+      .eq("email", email.trim().toLowerCase())
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ success: true, submission: data });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ================= DOCUMENT MODE: BACKGROUND AI WORKER (THE BATCH LOOP) =================
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 let isTaskProcessing = false;
 
-async function processTaskQueueEngine() {
-  if (isTaskProcessing) return;
-  isTaskProcessing = true;
-
-  try {
-    // 1. Extract exactly 1 pending document sequentially to prevent race conditions
-    const { data: jobs, error } = await supabase
-      .from("syntrix_submissions")
-      .select("*")
-      .eq("status", "pending")
-      .order('created_at', { ascending: true })
-      .limit(1);
-
-    if (error || !jobs || jobs.length === 0) {
-      isTaskProcessing = false;
-      return;
-    }
-
-    for (const job of jobs) {
-      try {
-        // Strip header from Base64 string before feeding to AI models
+// 🚀 Helper to process a single job so we can run them in parallel
+async function processSingleJob(job) {
+    try {
         const base64Data = job.temp_base64.replace(/^data:(image|application)\/\w+;base64,/, "");
 
-        // 2. DAILY QUOTA CHECK (Ignores rejected/fraud items from limit)
+        // 1. Daily Quota Check (Ignoring rejected/fraud)
         if (job.task_type === 'selfie') {
-          const today = new Date().toISOString().split('T')[0];
-          const { count: dailyCount } = await supabase
-            .from('syntrix_submissions')
-            .select('*', { count: 'exact', head: true })
-            .eq('email', job.email)
-            .eq('task_type', 'selfie')
-            .in('status', ['pending', 'approved', 'verified'])
-            .gte('created_at', today);
+            const today = new Date().toISOString().split('T')[0];
+            const { count: dailyCount } = await supabase
+                .from('syntrix_submissions')
+                .select('*', { count: 'exact', head: true })
+                .eq('email', job.email)
+                .eq('task_type', 'selfie')
+                .in('status', ['pending', 'approved', 'verified'])
+                .gte('created_at', today);
 
-          if (dailyCount > 1) { // Assuming 1 per day limit
-             await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'Daily limit reached', temp_base64: null }).eq('id', job.id);
-             continue;
-          }
+            if (dailyCount > 1) { 
+                await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'Daily limit reached', temp_base64: null }).eq('id', job.id);
+                return;
+            }
         }
 
-        // 3. 🚀 THE COMBINED PII & QUALITY BOUNCER
+        // 2. 🚀 THE COMBINED PII & QUALITY BOUNCER
         const qualityRules = job.task_type === 'selfie' 
-          ? 'Is it a clear, authentic photograph of a real human face?' 
-          : `Is this an authentic photo of physical, handwritten notes containing: ${job.contentTags || 'academic content'}? Reject PDFs, screenshots, printed textbook text, or blank pages.`;
+            ? 'Is it a clear, authentic photograph of a real human face? Provide a specific reason if it fails (e.g., blurry, multiple faces, bad lighting, not a human).' 
+            : `Is this an authentic photo of physical, handwritten notes containing: ${job.contentTags || 'academic content'}? Reject PDFs, screenshots, printed textbook text, or blank pages. Provide a specific reason if it fails (e.g., printed text detected, blurry, off-topic).`;
 
         const combinedPrompt = `You are a strict security and academic AI validator. Evaluate this image for TWO criteria:
-        
         1. QUALITY: ${qualityRules}
-        2. PII (Privacy Check): Analyze this image of handwritten academic notes or photos. Does this image contain Sensitive Personal Identifiable Information (PII) belonging to the author, such as a signature, a full legal name at the top of the page, a personal phone number, or a physical address? Ignore historical names, names used in math word problems, or textbook citations.
-
-        You MUST respond STRICTLY with a valid JSON object matching this format, with no other text or markdown:
-        {"quality_pass": true, "contains_pii": false}`;
-
-        console.log(`Processing Task UUID: ${job.id} | Checking Quality & PII...`);
+        2. PII: Does this image contain Sensitive Personal Identifiable Information (PII) such as a signature, full legal name, phone number, or physical address?
+        Respond STRICTLY with valid JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason for failure or success"}`;
         
         const response = await ai.models.generateContent({
-          model: 'gemini-3.5-flash',
-          contents: [combinedPrompt, { inlineData: { mimeType: 'image/jpeg', data: base64Data } }]
+            model: 'gemini-3.5-flash',
+            contents: [combinedPrompt, { inlineData: { mimeType: 'image/jpeg', data: base64Data } }]
         });
 
-        // 4. PARSE JSON VERDICT
-        let aiVerdict;
-        try {
-          const cleanJsonStr = response.text().replace(/```json/gi, "").replace(/```/g, "").trim();
-          aiVerdict = JSON.parse(cleanJsonStr);
-        } catch (parseErr) {
-          console.error("Failed to parse Gemini JSON:", response.text());
-          await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'AI parsing failure', temp_base64: null }).eq('id', job.id);
-          continue;
-        }
+        // 🚀 CRITICAL FIX: Using response.text (property) instead of response.text() (method) in newer SDK versions
+        let responseTextStr = typeof response.text === 'function' ? await response.text() : response.text;
+        if (!responseTextStr) responseTextStr = response.candidates[0].content.parts[0].text; // Fallback for some SDK versions
 
-        console.log(`AI Verdict for ${job.id}:`, aiVerdict);
+        const aiVerdict = JSON.parse(responseTextStr.replace(/```json/gi, "").replace(/```/g, "").trim());
 
-        // 5. STATUS ROUTER
         if (aiVerdict.contains_pii === true) {
-           await supabase.from('syntrix_submissions').update({ status: 'rejected_pii', reason: 'Contains Sensitive PII', temp_base64: null }).eq('id', job.id);
-           console.log(`Task ${job.id} REJECTED: Contains PII.`);
-           continue;
+            await supabase.from('syntrix_submissions').update({ status: 'rejected_pii', reason: 'Contains Sensitive PII', temp_base64: null }).eq('id', job.id);
+            return;
         }
 
         if (aiVerdict.quality_pass === false) {
-           await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'Failed AI quality guidelines', temp_base64: null }).eq('id', job.id);
-           console.log(`Task ${job.id} REJECTED: Poor Quality.`);
-           continue;
+            await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: aiVerdict.reason || 'Failed AI quality guidelines', temp_base64: null }).eq('id', job.id);
+            return;
         }
 
-        // 6. VECTOR DUPLICATE SHIELD
+        // 3. VECTOR DUPLICATE SHIELD (Updated Model)
         const embedRes = await ai.models.embedContent({
-          model: "gemini-embedding-2",
-          contents: [{ inlineData: { data: base64Data, mimeType: "image/jpeg" } }]
+            model: "text-embedding-004", // Most stable GA multimodal embedding model
+            contents: [{ inlineData: { data: base64Data, mimeType: "image/jpeg" } }]
         });
         const embedding = embedRes.embeddings[0].values;
 
-        // Perform similarity query against existing repository vectors
         const { data: matchData } = await supabase.rpc("match_homework_vectors", {
-          query_embedding: embedding,
-          match_threshold: 0.98,
-          match_count: 1
+            query_embedding: embedding,
+            match_threshold: 0.98,
+            match_count: 1
         });
 
         if (matchData && matchData.length > 0) {
-          await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate image detected", temp_base64: null }).eq("id", job.id);
-          console.log(`Task ${job.id} REJECTED: Duplicate Fraud.`);
-          continue;
+            await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate image detected", temp_base64: null }).eq("id", job.id);
+            return;
         }
 
-        // 7. FINAL COMMIT TO BUCKET
+        // 4. FINAL APPROVAL TO BUCKET
         const buffer = Buffer.from(base64Data, "base64");
         const storagePath = `${job.email}/${Date.now()}_${job.file_name}`;
         
-        // Push final physical image into verified bucket tier
         const { error: uploadError } = await supabase.storage
           .from("verified_assets")
           .upload(storagePath, buffer, { contentType: "image/jpeg" });
@@ -847,38 +823,50 @@ async function processTaskQueueEngine() {
           .from("verified_assets")
           .getPublicUrl(storagePath);
 
-        // Terminate record process: mark verified, link URL, lock vector, grant 48 SYNX, and DELETE base64 block
         await supabase.from("syntrix_submissions")
-          .update({
-            status: "verified",
-            temp_base64: null, 
-            storage_url: publicUrlData.publicUrl,
-            embedding: embedding,
-            reward_amount: 48 
-          })
-          .eq("id", job.id);
+            .update({ status: "verified", temp_base64: null, storage_url: publicUrlData.publicUrl, embedding: embedding, reward_amount: 48, reason: "Verified Successfully" })
+            .eq("id", job.id);
 
-        // Reward Allocation (User Table)
         const { data: userData } = await supabase.from('users').select('pendingRewards').eq('email', job.email).single();
         if(userData) {
-          await supabase.from('users').update({ pendingRewards: (userData.pendingRewards || 0) + 48 }).eq('email', job.email);
+            await supabase.from('users').update({ pendingRewards: (userData.pendingRewards || 0) + 48 }).eq('email', job.email);
+        } else {
+            await supabase.from('users').insert([{ email: job.email, pendingRewards: 48 }]);
         }
-        
-        console.log(`Task ${job.id} VERIFIED. 48 Tokens awarded.`);
 
-      } catch (jobErr) {
-        console.error(`[AI WORKER ERROR] Job ${job.id}:`, jobErr.message);
-      }
+    } catch (jobErr) { 
+        console.error(`Job ${job.id} error:`, jobErr.message); 
+        await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'System processing error', temp_base64: null }).eq('id', job.id);
     }
-  } catch (engineError) {
-    console.error("[TASK WORKER CRASH]:", engineError.message);
-  } finally {
-    isTaskProcessing = false;
+}
+
+async function processTaskQueueEngine() {
+  if (isTaskProcessing) return;
+  isTaskProcessing = true;
+
+  try {
+    // 🚀 BATCH PROCESSING FIX: Pull up to 5 jobs at once to clear backlogs faster
+    const { data: jobs, error } = await supabase
+      .from("syntrix_submissions")
+      .select("*")
+      .eq("status", "pending")
+      .order('created_at', { ascending: true })
+      .limit(5);
+
+    if (error || !jobs || jobs.length === 0) { isTaskProcessing = false; return; }
+
+    // Run them concurrently
+    await Promise.allSettled(jobs.map(job => processSingleJob(job)));
+
+  } catch (err) { 
+      console.error("Worker Crash:", err.message); 
+  } finally { 
+      isTaskProcessing = false; 
   }
 }
 
-// Spin up the background 60-second cron cycle
-setInterval(processTaskQueueEngine, 60000);
+// Increased frequency to check every 5 seconds for massive speed boosts
+setInterval(processTaskQueueEngine, 5000);
 
 
 const PORT = process.env.PORT || 5000;
