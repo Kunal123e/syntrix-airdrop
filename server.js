@@ -5,23 +5,20 @@ const cors = require("cors");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 const { ethers } = require("ethers");
-const { GoogleGenAI } = require("@google/genai"); // Added for AI Verification Engine
+const { GoogleGenAI } = require("@google/genai");
 
 const app = express();
 
 // ================= COORD ADJUSTMENTS (CORS & HEADERS) =================
-// Fully opens the gateway pipeline so your frontend never triggers a network offline drop
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key"]
 }));
 
-// STRICT RULE APPLIED: Limit boosted to 20mb to prevent Base64 expansion payload crash
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ limit: "20mb", extended: true }));
 
-// ================= MEMORY OPTIMIZATION & TIMEOUT GUARD =================
 app.use((req, res, next) => {
   res.setTimeout(60000, () => {
     if (!res.headersSent) {
@@ -34,7 +31,7 @@ app.use((req, res, next) => {
 // ================= SUPABASE CLIENT =================
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE // Explicit service role matching dashboard
+  process.env.SUPABASE_SERVICE_ROLE 
 );
 
 // ================= POLYGON CONFIGURATION =================
@@ -63,9 +60,6 @@ if (process.env.RPC_URL && process.env.PRIVATE_KEY && process.env.TOKEN_ADDRESS)
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const SENDER_NAME = "Syntrix Network";
 
-console.log(`BREVO API KEY FOUND: ${BREVO_API_KEY ? "YES" : "NO"}`);
-
-// Master HTTP Email Helper
 async function sendEmailHTTP(toEmail, subject, htmlContent) {
   if (!BREVO_API_KEY) {
     throw new Error("BREVO_API_KEY is missing in environment variables.");
@@ -252,12 +246,11 @@ app.get("/r/:refCode", (req, res) => {
   res.redirect(302, `${targetDomain}/?ref=${refCode}`);
 });
 
-// ================= SURVEY INGESTION SYSTEM (QUALITY GATE SECURED) =================
+// ================= SURVEY INGESTION SYSTEM =================
 app.post("/api/submit-survey", async (req, res) => {
   try {
     const { email, referredBy, answers, startTime, submissionTime, assignedBadge } = req.body;
 
-    // 🚀 STRICT SERVER-SIDE QUALITY CHECK: 120,000ms = 2 Minutes
     if (!startTime || !submissionTime) {
       return res.status(400).json({ error: "Missing required timing metrics. Please update your client." });
     }
@@ -349,7 +342,7 @@ app.post("/api/submit-survey", async (req, res) => {
   }
 });
 
-// ================= PROFILE LOOKUP (MATCHED TO FRONTEND USER-STATUS) =================
+// ================= PROFILE LOOKUP =================
 app.get("/api/user-status", async (req, res) => {
   const { email, ref } = req.query;
   if (!email) return res.status(400).json({ error: "Email parameter required" });
@@ -405,7 +398,6 @@ app.get("/api/user-status", async (req, res) => {
 
     const { data: rewards } = await supabase.from("syntrix_rewards").select("amount, status").eq("email", sanitizedEmail);
 
-    // 🚀 NEW: Check actual users table for rewards
     const { data: userTableRecord } = await supabase.from("users").select("pendingRewards, claimedRewards").eq("email", sanitizedEmail).maybeSingle();
 
     let pendingRewards = 0, claimedRewards = 0;
@@ -452,7 +444,7 @@ app.get("/api/user-status", async (req, res) => {
   }
 });
 
-// ================= CLAIM DETAILS LOOKUP (MATCHED TO FRONTEND) =================
+// ================= CLAIM DETAILS LOOKUP =================
 app.get("/api/claim-details", async (req, res) => {
   const { token } = req.query;
   if (!token) return res.status(400).json({ error: "Claim token parameter required." });
@@ -662,7 +654,7 @@ function addUniqueThreadGuard() {
 
 // ================= DOCUMENT MODE: WAITING ROOM INGESTION & TEMPORAL RATE LIMITING =================
 app.post("/api/upload-task", async (req, res) => {
-  const { userEmail, taskType, fileName, imageBase64, contentTags } = req.body; // Added contentTags
+  const { userEmail, taskType, fileName, imageBase64, contentTags } = req.body; 
 
   if (!userEmail || !taskType || !fileName || !imageBase64) {
     return res.status(400).json({ error: "Missing required document fields." });
@@ -671,7 +663,6 @@ app.post("/api/upload-task", async (req, res) => {
   const sanitizedEmail = userEmail.trim().toLowerCase();
 
   try {
-    // 🛡️ Temporal Rate Limiting Check (Only for 'selfie' tasks)
     if (taskType === "selfie") {
       const startOfMonth = new Date();
       startOfMonth.setDate(1);
@@ -691,7 +682,6 @@ app.post("/api/upload-task", async (req, res) => {
       }
     }
 
-    // Insert payload into the Postgres Waiting Room as a pending text block
     const { error } = await supabase.from("syntrix_submissions").insert([{
       email: sanitizedEmail,
       task_type: taskType,
@@ -705,7 +695,6 @@ app.post("/api/upload-task", async (req, res) => {
 
     res.json({ success: true, message: "Queued for Verification" });
 
-    // 🚀 IMMEDIATE TRIGGER FIX: Instantly fire the worker logic so users don't wait for the interval
     processTaskQueueEngine();
 
   } catch (err) {
@@ -743,7 +732,6 @@ async function processSingleJob(job) {
     try {
         const base64Data = job.temp_base64.replace(/^data:(image|application)\/\w+;base64,/, "");
 
-        // 1. Daily Quota Check (Ignoring rejected/fraud)
         if (job.task_type === 'selfie') {
             const today = new Date().toISOString().split('T')[0];
             const { count: dailyCount } = await supabase
@@ -760,7 +748,6 @@ async function processSingleJob(job) {
             }
         }
 
-        // 2. 🚀 THE COMBINED PII & QUALITY BOUNCER
         const qualityRules = job.task_type === 'selfie' 
             ? 'Is it a clear, authentic photograph of a real human face? Provide a specific reason if it fails (e.g., blurry, multiple faces, bad lighting, not a human).' 
             : `Is this an authentic photo of physical, handwritten notes containing: ${job.contentTags || 'academic content'}? Reject PDFs, screenshots, printed textbook text, or blank pages. Provide a specific reason if it fails (e.g., printed text detected, blurry, off-topic).`;
@@ -770,14 +757,14 @@ async function processSingleJob(job) {
         2. PII: Does this image contain Sensitive Personal Identifiable Information (PII) such as a signature, full legal name, phone number, or physical address?
         Respond STRICTLY with valid JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason for failure or success"}`;
         
+        // 🚀 FIX: Rolled back to gemini-1.5-flash to prevent 404 model errors and crashes
         const response = await ai.models.generateContent({
-            model: 'gemini-3.5-flash',
+            model: 'gemini-1.5-flash', 
             contents: [combinedPrompt, { inlineData: { mimeType: 'image/jpeg', data: base64Data } }]
         });
 
-        // 🚀 CRITICAL FIX: Using response.text (property) instead of response.text() (method) in newer SDK versions
         let responseTextStr = typeof response.text === 'function' ? await response.text() : response.text;
-        if (!responseTextStr) responseTextStr = response.candidates[0].content.parts[0].text; // Fallback for some SDK versions
+        if (!responseTextStr) responseTextStr = response.candidates[0].content.parts[0].text; 
 
         const aiVerdict = JSON.parse(responseTextStr.replace(/```json/gi, "").replace(/```/g, "").trim());
 
@@ -791,9 +778,8 @@ async function processSingleJob(job) {
             return;
         }
 
-        // 3. VECTOR DUPLICATE SHIELD (Updated Model)
         const embedRes = await ai.models.embedContent({
-            model: "text-embedding-004", // Most stable GA multimodal embedding model
+            model: "text-embedding-004", 
             contents: [{ inlineData: { data: base64Data, mimeType: "image/jpeg" } }]
         });
         const embedding = embedRes.embeddings[0].values;
@@ -809,7 +795,6 @@ async function processSingleJob(job) {
             return;
         }
 
-        // 4. FINAL APPROVAL TO BUCKET
         const buffer = Buffer.from(base64Data, "base64");
         const storagePath = `${job.email}/${Date.now()}_${job.file_name}`;
         
@@ -836,7 +821,8 @@ async function processSingleJob(job) {
 
     } catch (jobErr) { 
         console.error(`Job ${job.id} error:`, jobErr.message); 
-        await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'System processing error', temp_base64: null }).eq('id', job.id);
+        // 🚀 FIX: Now sends the exact crash reason to the UI (e.g., "Bucket not found")
+        await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: `System Error: ${jobErr.message}`, temp_base64: null }).eq('id', job.id);
     }
 }
 
@@ -845,7 +831,6 @@ async function processTaskQueueEngine() {
   isTaskProcessing = true;
 
   try {
-    // 🚀 BATCH PROCESSING FIX: Pull up to 5 jobs at once to clear backlogs faster
     const { data: jobs, error } = await supabase
       .from("syntrix_submissions")
       .select("*")
@@ -855,7 +840,6 @@ async function processTaskQueueEngine() {
 
     if (error || !jobs || jobs.length === 0) { isTaskProcessing = false; return; }
 
-    // Run them concurrently
     await Promise.allSettled(jobs.map(job => processSingleJob(job)));
 
   } catch (err) { 
@@ -865,9 +849,7 @@ async function processTaskQueueEngine() {
   }
 }
 
-// Increased frequency to check every 5 seconds for massive speed boosts
 setInterval(processTaskQueueEngine, 5000);
-
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
