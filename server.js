@@ -71,7 +71,7 @@ async function sendEmailHTTP(toEmail, subject, htmlContent) {
     throw new Error("BREVO_API_KEY is missing in environment variables.");
   }
 
-  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+  const response = await fetch("[https://api.brevo.com/v3/smtp/email](https://api.brevo.com/v3/smtp/email)", {
     method: "POST",
     headers: {
       "accept": "application/json",
@@ -248,7 +248,7 @@ app.post("/api/send-invite", async (req, res) => {
 // ================= DYNAMIC QR REDIRECTOR =================
 app.get("/r/:refCode", (req, res) => {
   const refCode = req.params.refCode;
-  const targetDomain = process.env.FRONTEND_URL || "https://syntrix-airdrop.onrender.com"; 
+  const targetDomain = process.env.FRONTEND_URL || "[https://syntrix-airdrop.onrender.com](https://syntrix-airdrop.onrender.com)"; 
   res.redirect(302, `${targetDomain}/?ref=${refCode}`);
 });
 
@@ -261,6 +261,13 @@ app.post("/api/submit-survey", async (req, res) => {
     if (!startTime || !submissionTime) {
       return res.status(400).json({ error: "Missing required timing metrics. Please update your client." });
     }
+
+    const currentTime = Date.now();
+    // Anti-spoofing logic: Ensure submissionTime isn't completely out of sync with server time
+    if (submissionTime > currentTime + 5000 || startTime > currentTime) {
+       return res.status(400).json({ error: "Invalid timestamp synchronization detected." });
+    }
+
     const timeTaken = submissionTime - startTime;
     if (timeTaken < 120000) {
       return res.status(400).json({ error: "Survey completed too quickly. Please take adequate time to provide quality insights." });
@@ -626,9 +633,16 @@ async function processPayoutQueueEngine() {
 
       // Execute automated deduction/transfer from primary host wallet balance allocation
       const tx = await tokenContract.transfer(queueJob.wallet_address, amount);
-      console.log(`[QUEUE ENGINE] Broadcasted transaction on-chain: ${tx.hash}. Waiting confirmation block metrics...`);
+      console.log(`[QUEUE ENGINE] Broadcasted transaction on-chain: ${tx.hash}.`);
       
-      await tx.wait();
+      // 🚀 ARCHITECT FIX: Do NOT await tx.wait() here. Log the broadcast and free the queue.
+      // A separate cron job should poll Supabase for 'processing' status and check tx receipts.
+      await supabase.from("syntrix_payout_queue").update({
+        status: "processing", // Leave in processing until a receipt monitor confirms it
+        tx_hash: tx.hash
+      }).eq("id", queueJob.id);
+
+      // Optimistically update the downstream tables (or wait for the receipt monitor to do this)
       await finalizeSuccessfulQueueJob(queueJob, tx.hash);
 
     } catch (blockchainError) {
@@ -794,14 +808,23 @@ async function processSingleJob(job) {
         
         const response = await ai.models.generateContent({
             model: 'gemini-1.5-flash', // 🚀 FIX: Rolled back to gemini-1.5-flash to prevent 404 model errors and crashes
-            contents: [combinedPrompt, { inlineData: { mimeType: 'image/jpeg', data: base64Data } }]
+            contents: [combinedPrompt, { inlineData: { mimeType: 'image/jpeg', data: base64Data } }],
+            config: {
+                responseMimeType: "application/json",
+            }
         });
 
         // 🚀 CRITICAL FIX: Using response.text (property) instead of response.text() (method) in newer SDK versions
         let responseTextStr = typeof response.text === 'function' ? await response.text() : response.text;
         if (!responseTextStr) responseTextStr = response.candidates[0].content.parts[0].text; 
 
-        const aiVerdict = JSON.parse(responseTextStr.replace(/```json/gi, "").replace(/```/g, "").trim());
+        // 🚀 ARCHITECT FIX: Safe parsing with guaranteed JSON mime type
+        let aiVerdict;
+        try {
+            aiVerdict = JSON.parse(responseTextStr.trim());
+        } catch (parseErr) {
+            throw new Error(`AI generated invalid JSON payload: ${parseErr.message}`);
+        }
 
         if (aiVerdict.contains_pii === true) {
             await supabase.from('syntrix_submissions').update({ status: 'rejected_pii', reason: 'Contains Sensitive PII', temp_base64: null }).eq('id', job.id);
