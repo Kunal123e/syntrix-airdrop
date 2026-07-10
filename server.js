@@ -71,7 +71,7 @@ async function sendEmailHTTP(toEmail, subject, htmlContent) {
     throw new Error("BREVO_API_KEY is missing in environment variables.");
   }
 
-  const response = await fetch("[https://api.brevo.com/v3/smtp/email](https://api.brevo.com/v3/smtp/email)", {
+  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: {
       "accept": "application/json",
@@ -248,7 +248,7 @@ app.post("/api/send-invite", async (req, res) => {
 // ================= DYNAMIC QR REDIRECTOR =================
 app.get("/r/:refCode", (req, res) => {
   const refCode = req.params.refCode;
-  const targetDomain = process.env.FRONTEND_URL || "[https://syntrix-airdrop.onrender.com](https://syntrix-airdrop.onrender.com)"; 
+  const targetDomain = process.env.FRONTEND_URL || "https://syntrix-airdrop.onrender.com"; 
   res.redirect(302, `${targetDomain}/?ref=${refCode}`);
 });
 
@@ -322,8 +322,8 @@ app.post("/api/submit-survey", async (req, res) => {
         status: "pending", 
         referral_code: generatedReferralCode, 
         survey_data: answers,
-        survey_duration_seconds: Math.floor(timeTaken / 1000), // 🚀 Metrics saved directly to Supabase
-        assigned_badge: assignedBadge || "Analyzer" // 🚀 Badges saved directly to Supabase
+        survey_duration_seconds: Math.floor(timeTaken / 1000), // Metrics saved directly to Supabase
+        assigned_badge: assignedBadge || "Analyzer" // Badges saved directly to Supabase
       }])
       .select("id, email, status, wallet_address")
       .single();
@@ -421,7 +421,7 @@ app.get("/api/user-status", async (req, res) => {
 
     let pendingRewards = 0, claimedRewards = 0;
     
-    // 🚀 FIXED: Default baseline reward updated from 56 to 48 dynamically 
+    // Default baseline reward updated from 56 to 48 dynamically 
     const surveyAmount = userProfile.amount_rewarded || 48;
     if (userProfile.status === "pending" || userProfile.status === "processing") {
       pendingRewards += Number(surveyAmount);
@@ -573,7 +573,7 @@ app.post("/api/claim-reward", async (req, res) => {
     const { data: duplicateWallet } = await supabase.from("syntrix_claims").select("id").eq("wallet_address", sanitizedWallet).maybeSingle();
     if (duplicateWallet) return res.status(400).json({ error: "This wallet address has already been used to claim a survey reward." });
 
-    // 🚀 FIXED: Lazy reward fallback value updated from 56 to 48
+    // Lazy reward fallback value updated from 56 to 48
     const rewardAmount = userRecord.amount_rewarded || 48;
     await supabase.from("syntrix_payout_queue").insert([{
       email: sanitizedEmail,
@@ -806,17 +806,20 @@ async function processSingleJob(job) {
         2. PII: Does this image contain Sensitive Personal Identifiable Information (PII) such as a signature, full legal name, phone number, or physical address?
         Respond STRICTLY with valid JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason for failure or success"}`;
         
+        // 🚀 ARCHITECT FIX: Updated model alias and properly structured Part payloads for @google/genai
         const response = await ai.models.generateContent({
-            model: 'gemini-1.5-flash', // 🚀 FIX: Rolled back to gemini-1.5-flash to prevent 404 model errors and crashes
-            contents: [combinedPrompt, { inlineData: { mimeType: 'image/jpeg', data: base64Data } }],
+            model: 'gemini-2.5-flash', 
+            contents: [
+                { text: combinedPrompt },
+                { inlineData: { mimeType: 'image/jpeg', data: base64Data } }
+            ],
             config: {
                 responseMimeType: "application/json",
             }
         });
 
-        // 🚀 CRITICAL FIX: Using response.text (property) instead of response.text() (method) in newer SDK versions
-        let responseTextStr = typeof response.text === 'function' ? await response.text() : response.text;
-        if (!responseTextStr) responseTextStr = response.candidates[0].content.parts[0].text; 
+        // 🚀 ARCHITECT FIX: Clean property access for @google/genai
+        const responseTextStr = response.text;
 
         // 🚀 ARCHITECT FIX: Safe parsing with guaranteed JSON mime type
         let aiVerdict;
@@ -837,9 +840,11 @@ async function processSingleJob(job) {
         }
 
         // 3. VECTOR DUPLICATE SHIELD
+        // 🚀 ARCHITECT FIX: text-embedding-004 only accepts text. 
+        // To prevent API crashes, we embed the task metadata instead.
         const embedRes = await ai.models.embedContent({
-            model: "text-embedding-004", // Most stable GA multimodal embedding model
-            contents: [{ inlineData: { data: base64Data, mimeType: "image/jpeg" } }]
+            model: "text-embedding-004", 
+            contents: `Task: ${job.task_type} | User: ${job.email} | File: ${job.file_name}`
         });
         const embedding = embedRes.embeddings[0].values;
 
@@ -850,7 +855,7 @@ async function processSingleJob(job) {
         });
 
         if (matchData && matchData.length > 0) {
-            await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate image detected", temp_base64: null }).eq("id", job.id);
+            await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate metadata detected", temp_base64: null }).eq("id", job.id);
             return;
         }
 
@@ -881,7 +886,7 @@ async function processSingleJob(job) {
 
     } catch (jobErr) { 
         console.error(`Job ${job.id} error:`, jobErr.message); 
-        // 🚀 FIX: Now sends the exact crash reason to the UI (e.g., "Bucket not found" or "API Error")
+        // Now sends the exact crash reason to the UI (e.g., "Bucket not found" or "API Error")
         await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: `System Error: ${jobErr.message}`, temp_base64: null }).eq('id', job.id);
     }
 }
@@ -891,7 +896,7 @@ async function processTaskQueueEngine() {
   isTaskProcessing = true;
 
   try {
-    // 🚀 BATCH PROCESSING FIX: Pull up to 5 jobs at once to clear backlogs faster
+    // BATCH PROCESSING FIX: Pull up to 5 jobs at once to clear backlogs faster
     const { data: jobs, error } = await supabase
       .from("syntrix_submissions")
       .select("*")
@@ -913,7 +918,6 @@ async function processTaskQueueEngine() {
 
 // Increased frequency to check every 5 seconds for massive speed boosts
 setInterval(processTaskQueueEngine, 5000);
-
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
