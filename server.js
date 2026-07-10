@@ -313,7 +313,6 @@ app.post("/api/submit-survey", async (req, res) => {
       isReferralValid = true;
     }
 
-    // 🚀 FIXED: Survey completion amount_rewarded updated, and duration + badges saved to Supabase
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([{
@@ -635,7 +634,7 @@ async function processPayoutQueueEngine() {
       const tx = await tokenContract.transfer(queueJob.wallet_address, amount);
       console.log(`[QUEUE ENGINE] Broadcasted transaction on-chain: ${tx.hash}.`);
       
-      // 🚀 ARCHITECT FIX: Do NOT await tx.wait() here. Log the broadcast and free the queue.
+      // Do NOT await tx.wait() here. Log the broadcast and free the queue.
       // A separate cron job should poll Supabase for 'processing' status and check tx receipts.
       await supabase.from("syntrix_payout_queue").update({
         status: "processing", // Leave in processing until a receipt monitor confirms it
@@ -774,28 +773,6 @@ app.post("/api/upload-task", async (req, res) => {
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 let isTaskProcessing = false;
 
-// 🚀 ARCHITECT FIX: Exponential Backoff Circuit Breaker for AI API Calls
-async function executeWithRetry(apiCall, maxRetries = 3) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await apiCall();
-    } catch (error) {
-      const status = error.status || error.response?.status;
-      // Identify retryable network/gateway errors and rate limits
-      const isRetryable = [408, 429, 500, 502, 503, 504].includes(status) || error.message.includes('fetch failed') || error.message.includes('timeout');
-
-      if (i === maxRetries - 1 || !isRetryable) {
-        throw error;
-      }
-
-      // Jittered exponential backoff: ~2s, ~4s, ~8s
-      const delay = Math.pow(2, i) * 2000 + Math.random() * 1000;
-      console.warn(`[AI Engine] Gateway bottleneck (Status: ${status || 'Timeout'}). Retrying in ${Math.round(delay)}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-}
-
 // Helper to process a single job so we can run them in parallel
 async function processSingleJob(job) {
     try {
@@ -828,7 +805,8 @@ async function processSingleJob(job) {
         2. PII: Does this image contain Sensitive Personal Identifiable Information (PII) such as a signature, full legal name, phone number, or physical address?
         Respond STRICTLY with valid JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason for failure or success"}`;
         
-        const response = await executeWithRetry(() => ai.models.generateContent({
+        // Updated model alias and properly structured Part payloads for @google/genai
+        const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash', 
             contents: [
                 { text: combinedPrompt },
@@ -837,10 +815,12 @@ async function processSingleJob(job) {
             config: {
                 responseMimeType: "application/json",
             }
-        }));
+        });
 
+        // Clean property access for @google/genai
         const responseTextStr = response.text;
 
+        // Safe parsing with guaranteed JSON mime type
         let aiVerdict;
         try {
             aiVerdict = JSON.parse(responseTextStr.trim());
@@ -859,12 +839,12 @@ async function processSingleJob(job) {
         }
 
         // 3. VECTOR DUPLICATE SHIELD
-        // 🚀 ARCHITECT FIX: Strictly bound to the active 'text-embedding-004' identifier
-        const embedRes = await executeWithRetry(() => ai.models.embedContent({
+        // 🚀 ARCHITECT FIX: text-embedding-004 only accepts text. 
+        // To prevent API crashes, we embed the task metadata instead.
+        const embedRes = await ai.models.embedContent({
             model: "text-embedding-004", 
             contents: `Task: ${job.task_type} | User: ${job.email} | File: ${job.file_name}`
-        }));
-        
+        });
         const embedding = embedRes.embeddings[0].values;
 
         const { data: matchData } = await supabase.rpc("match_homework_vectors", {
@@ -905,14 +885,7 @@ async function processSingleJob(job) {
 
     } catch (jobErr) { 
         console.error(`Job ${job.id} error:`, jobErr.message); 
-        
-        const isTemporaryNetworkIssue = jobErr.message.includes('fetch failed') || jobErr.message.includes('timeout') || jobErr.status === 503;
-        
-        if (isTemporaryNetworkIssue) {
-           console.warn(`Job ${job.id} delayed due to network instantiation limits. Returning to queue.`);
-           return; 
-        }
-
+        // Now sends the exact crash reason to the UI (e.g., "Bucket not found" or "API Error")
         await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: `System Error: ${jobErr.message}`, temp_base64: null }).eq('id', job.id);
     }
 }
@@ -922,15 +895,17 @@ async function processTaskQueueEngine() {
   isTaskProcessing = true;
 
   try {
+    // BATCH PROCESSING FIX: Pull up to 5 jobs at once to clear backlogs faster
     const { data: jobs, error } = await supabase
       .from("syntrix_submissions")
       .select("*")
       .eq("status", "pending")
       .order('created_at', { ascending: true })
-      .limit(3);
+      .limit(5);
 
     if (error || !jobs || jobs.length === 0) { isTaskProcessing = false; return; }
 
+    // Run them concurrently
     await Promise.allSettled(jobs.map(job => processSingleJob(job)));
 
   } catch (err) { 
@@ -940,7 +915,8 @@ async function processTaskQueueEngine() {
   }
 }
 
-setInterval(processTaskQueueEngine, 8000);
+// Increased frequency to check every 5 seconds for massive speed boosts
+setInterval(processTaskQueueEngine, 5000);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
