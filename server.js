@@ -802,7 +802,7 @@ async function processSingleJob(job) {
 
         const combinedPrompt = `You are a strict security and academic AI validator. Evaluate this image for TWO criteria:
         1. QUALITY: ${qualityRules}
-        2. PII: Does this image contain Sensitive Personal Identifiable Information (PII) such as a signature, full legal name, phone number, or physical address?
+        2. PII: Does this image contain Sensitive Personal Identifiable Information (PII) like a real person's private phone number or physical home address? (CRITICAL RULE: Ignore generic brand names, logos on clothing, printed textbook author names, and math numbers. Only flag actual private user data).
         Respond STRICTLY with valid JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason for failure or success"}`;
         
         // Updated model alias and properly structured Part payloads for @google/genai
