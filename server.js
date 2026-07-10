@@ -839,10 +839,9 @@ async function processSingleJob(job) {
         }
 
         // 3. VECTOR DUPLICATE SHIELD
-        // 🚀 ARCHITECT FIX: text-embedding-004 only accepts text. 
-        // To prevent API crashes, we embed the task metadata instead.
+        // 🚀 ARCHITECT FIX: Updated to Google's newest active embedding model
         const embedRes = await ai.models.embedContent({
-            model: "text-embedding-004", 
+            model: "gemini-embedding-001", 
             contents: `Task: ${job.task_type} | User: ${job.email} | File: ${job.file_name}`
         });
         const embedding = embedRes.embeddings[0].values;
