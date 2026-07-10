@@ -828,7 +828,6 @@ async function processSingleJob(job) {
         2. PII: Does this image contain Sensitive Personal Identifiable Information (PII) such as a signature, full legal name, phone number, or physical address?
         Respond STRICTLY with valid JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason for failure or success"}`;
         
-        // 🚀 ARCHITECT FIX: Wrapped in resilient retry logic and locked to official model naming convention
         const response = await executeWithRetry(() => ai.models.generateContent({
             model: 'gemini-2.5-flash', 
             contents: [
@@ -860,7 +859,7 @@ async function processSingleJob(job) {
         }
 
         // 3. VECTOR DUPLICATE SHIELD
-        // 🚀 ARCHITECT FIX: Wrapped in resilient retry logic and locked to text-embedding-004
+        // 🚀 ARCHITECT FIX: Strictly bound to the active 'text-embedding-004' identifier
         const embedRes = await executeWithRetry(() => ai.models.embedContent({
             model: "text-embedding-004", 
             contents: `Task: ${job.task_type} | User: ${job.email} | File: ${job.file_name}`
@@ -907,12 +906,10 @@ async function processSingleJob(job) {
     } catch (jobErr) { 
         console.error(`Job ${job.id} error:`, jobErr.message); 
         
-        // 🚀 ARCHITECT FIX: Do not permanently fail jobs on temporary network timeouts.
         const isTemporaryNetworkIssue = jobErr.message.includes('fetch failed') || jobErr.message.includes('timeout') || jobErr.status === 503;
         
         if (isTemporaryNetworkIssue) {
            console.warn(`Job ${job.id} delayed due to network instantiation limits. Returning to queue.`);
-           // Leave status as pending, but clear base64 temporarily if needed (or leave it to retry)
            return; 
         }
 
@@ -925,7 +922,6 @@ async function processTaskQueueEngine() {
   isTaskProcessing = true;
 
   try {
-    // 🚀 ARCHITECT FIX: Reduced limit to 3 to prevent immediate IP-level rate limit drops from Google gateways.
     const { data: jobs, error } = await supabase
       .from("syntrix_submissions")
       .select("*")
@@ -935,7 +931,6 @@ async function processTaskQueueEngine() {
 
     if (error || !jobs || jobs.length === 0) { isTaskProcessing = false; return; }
 
-    // Run them concurrently (now safely throttled and retry-wrapped)
     await Promise.allSettled(jobs.map(job => processSingleJob(job)));
 
   } catch (err) { 
@@ -945,7 +940,6 @@ async function processTaskQueueEngine() {
   }
 }
 
-// 🚀 ARCHITECT FIX: Increased interval to 8 seconds to allow bucket clearance and respect Token-Per-Minute (TPM) limits.
 setInterval(processTaskQueueEngine, 8000);
 
 const PORT = process.env.PORT || 5000;
