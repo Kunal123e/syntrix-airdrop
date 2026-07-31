@@ -13,13 +13,13 @@ const app = express();
 // Fully opens the gateway pipeline so your frontend never triggers a network offline drop
 app.use(cors({
   origin: "*",
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key"]
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key", "Origin", "X-Requested-With"]
 }));
 
-// STRICT RULE APPLIED: Limit boosted to 20mb to prevent Base64 expansion payload crash
-app.use(express.json({ limit: "20mb" }));
-app.use(express.urlencoded({ limit: "20mb", extended: true }));
+// STRICT RULE APPLIED: Limit boosted to 50mb to completely prevent Base64 expansion payload crashes and WAF drops
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true, parameterLimit: 50000 }));
 
 // ================= MEMORY OPTIMIZATION & TIMEOUT GUARD =================
 app.use((req, res, next) => {
