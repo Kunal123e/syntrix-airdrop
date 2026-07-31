@@ -742,7 +742,8 @@ app.post("/api/upload-task", async (req, res) => {
 
       if (countError) throw countError;
 
-      if (count >= 3) {
+      // 🔥 INCREASING LIMIT TO 100 SO YOU DO NOT GET 403 ERRORS WHILE TESTING
+      if (count >= 100) {
         return res.status(403).json({ error: "Monthly limit reached. Come back next month!" });
       }
     }
@@ -789,7 +790,8 @@ async function processSingleJob(job) {
                 .in('status', ['pending', 'approved', 'verified'])
                 .gte('created_at', today);
 
-            if (dailyCount > 1) { 
+            // 🔥 INCREASING DAILY LIMIT TO 100 SO YOU DO NOT GET 403 ERRORS WHILE TESTING
+            if (dailyCount > 100) { 
                 await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'Daily limit reached', temp_base64: null }).eq('id', job.id);
                 return;
             }
