@@ -7,6 +7,9 @@ const { createClient } = require("@supabase/supabase-js");
 const { ethers } = require("ethers");
 const { GoogleGenAI } = require("@google/genai"); 
 
+// 🚀 XP SYSTEM IMPORT (MODULAR ADDITION)
+const { awardXP, getXPProfile } = require("./xpEngine");
+
 const app = express();
 
 // ================= COORD ADJUSTMENTS (CORS & HEADERS) =================
@@ -328,6 +331,9 @@ app.post("/api/submit-survey", async (req, res) => {
       return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
     }
 
+    // 🚀 XP HOOK: Award +300 XP for Survey Completion
+    await awardXP(supabase, sanitizedEmail, 300, "Survey Completed", "survey");
+
     if (isReferralValid && referrerRecord) {
       const claimToken = crypto.randomBytes(32).toString('hex');
       await supabase.from("syntrix_referrals").insert([{
@@ -337,6 +343,9 @@ app.post("/api/submit-survey", async (req, res) => {
       await supabase.from("syntrix_rewards").insert([{
         email: referrerRecord.email, reward_type: "referral", amount: 10, status: "pending", claim_token: claimToken
       }]);
+
+      // 🚀 XP HOOK: Award +120 XP for Referral Success
+      await awardXP(supabase, referrerRecord.email, 120, "Referral Success", "referral");
 
       await sendRewardNotification(referrerRecord.email, 10, claimToken);
     }
@@ -359,6 +368,10 @@ app.get("/api/user-status", async (req, res) => {
 
   try {
     const sanitizedEmail = email.trim().toLowerCase();
+
+    // 🚀 XP HOOK: Award Daily Login XP
+    // Note: We'll pass "login" category, the XP Engine will handle deduplication using last_login logic.
+    await awardXP(supabase, sanitizedEmail, 10, "Daily Login", "login");
 
     if (ref) {
       const cleanRefCode = normalizeReferralCode(ref);
@@ -888,6 +901,11 @@ async function processSingleJob(job) {
             await supabase.from('users').insert([{ email: job.email, pendingRewards: 48 }]);
         }
 
+        // 🚀 XP HOOK: Award XP based on verified mode
+        const xpAmount = isSelfie ? 60 : 70;
+        const xpReason = isSelfie ? "Selfie Verified" : "Document Verified";
+        await awardXP(supabase, job.email, xpAmount, xpReason, isSelfie ? "selfie" : "document");
+
     } catch (jobErr) { 
         console.error(`Job ${job.id} error:`, jobErr.message); 
         await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: `System Error: ${jobErr.message}`, temp_base64: null }).eq('id', job.id);
@@ -918,6 +936,19 @@ async function processTaskQueueEngine() {
 }
 
 setInterval(processTaskQueueEngine, 5000);
+
+// ================= XP PROFILE LOOKUP ROUTE =================
+app.get("/api/xp-profile", async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: "Email parameter required" });
+
+  try {
+    const profile = await getXPProfile(supabase, email);
+    return res.json({ success: true, profile });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
