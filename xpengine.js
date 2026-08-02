@@ -15,6 +15,40 @@ const RANKS = [
   { level: 10, rank: 'AI Pioneer', xpRequired: 8000 }
 ];
 
+// 🚀 NEW: CORE ECONOMIC MULTIPLIER ALGORITHM
+function getLevelMultiplier(level) {
+  if (level >= 10) return 2.25;
+  if (level === 9)  return 2.10;
+  if (level === 8)  return 1.95;
+  if (level === 7)  return 1.80;
+  if (level === 6)  return 1.65;
+  if (level === 5)  return 1.50; // Milestone!
+  if (level === 4)  return 1.35;
+  if (level === 3)  return 1.20;
+  if (level === 2)  return 1.10;
+  return 1.00; // Level 1 Baseline
+}
+
+// 🚀 NEW: TASK PAYOUT CRUNCHER
+function calculateFinalTaskReward(baseAmount, level, streakDays) {
+  const levelMult = getLevelMultiplier(level);
+  
+  // Cap streak bonus at 20% (10 consecutive days)
+  const streakBonus = Math.min(0.20, (streakDays || 0) * 0.02);
+  const totalMult = levelMult * (1 + streakBonus);
+  
+  // Round to exactly 2 decimal places for financial accuracy
+  const finalReward = Math.round((baseAmount * totalMult) * 100) / 100;
+
+  return {
+    baseAmount,
+    finalReward,
+    levelMult,
+    streakBonusPercent: Math.round(streakBonus * 100),
+    totalMultiplier: Math.round(totalMult * 100) / 100
+  };
+}
+
 function calculateLevelAndRank(totalXP) {
   let level = 1;
   let rank = 'Explorer';
@@ -64,7 +98,9 @@ async function awardXP(supabase, email, amount, reason, category = null) {
           total_xp: 0,
           current_level: 1,
           current_rank: 'Explorer',
-          highest_level: 1
+          highest_level: 1,
+          daily_streak: 0,
+          last_login_date: null
         }])
         .select('*')
         .single();
@@ -86,7 +122,33 @@ async function awardXP(supabase, email, amount, reason, category = null) {
       }
     }
 
-    // 3. Calculate new level metrics
+    // 🚀 3. EXACT DAILY STREAK CALCULATION LOGIC
+    let daily_streak = profile.daily_streak || 0;
+    let last_login_date = profile.last_login_date || null;
+    
+    // Use strict UTC date to avoid local timezone abuse
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    
+    if (category === 'login') {
+        if (last_login_date === today) {
+            console.log(`[XP ENGINE] ${sanitizedEmail} already claimed daily login today. Streak preserved.`);
+            return; // Exit silently, they already got their login XP today
+        }
+        
+        const yesterdayDate = new Date(now);
+        yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+        const yesterday = yesterdayDate.toISOString().split('T')[0];
+
+        if (last_login_date === yesterday) {
+            daily_streak += 1; // Streak preserved and increased!
+        } else {
+            daily_streak = 1; // Streak broken, reset back to Day 1
+        }
+        last_login_date = today;
+    }
+
+    // 4. Calculate new level metrics
     const newTotalXP = (profile.total_xp || 0) + amount;
     const { level, rank } = calculateLevelAndRank(newTotalXP);
 
@@ -95,6 +157,8 @@ async function awardXP(supabase, email, amount, reason, category = null) {
       current_level: level,
       current_rank: rank,
       highest_level: Math.max(profile.highest_level || 1, level),
+      daily_streak: daily_streak,
+      last_login_date: last_login_date !== null ? last_login_date : profile.last_login_date,
       updated_at: new Date().toISOString()
     };
 
@@ -103,7 +167,7 @@ async function awardXP(supabase, email, amount, reason, category = null) {
     if (category === 'selfie') updates.selfie_count = (profile.selfie_count || 0) + 1;
     if (category === 'referral') updates.referral_count = (profile.referral_count || 0) + 1;
 
-    // 4. Update Profile & Append History Ledger
+    // 5. Update Profile & Append History Ledger
     await supabase.from('syntrix_xp_profile').update(updates).eq('email', sanitizedEmail);
     await supabase.from('syntrix_xp_history').insert([{
       email: sanitizedEmail,
@@ -111,7 +175,7 @@ async function awardXP(supabase, email, amount, reason, category = null) {
       reason: reason
     }]);
 
-    console.log(`[XP ENGINE] +${amount} XP -> ${sanitizedEmail} ('${reason}'). New Level: ${level} (${rank})`);
+    console.log(`[XP ENGINE] +${amount} XP -> ${sanitizedEmail} ('${reason}'). Level: ${level}, Streak: ${daily_streak}`);
 
   } catch (err) {
     console.error('[XP ENGINE ERROR]:', err.message);
@@ -136,6 +200,11 @@ async function getXPProfile(supabase, email) {
       xpCurrentLevel: 0,
       xpRequiredNextLevel: 200,
       levelProgressPercentage: 0,
+      highestLevel: 1,
+      dailyStreak: 0,
+      multiplier: 1.0,
+      streakBonusPercent: 0,
+      totalMultiplier: 1.0,
       recentHistory: []
     };
   }
@@ -152,6 +221,9 @@ async function getXPProfile(supabase, email) {
     .order('created_at', { ascending: false })
     .limit(5);
 
+  // 🚀 Expose financial multiplier stats to the UI
+  const rewardStats = calculateFinalTaskReward(48, level, profile.daily_streak);
+
   return {
     totalXP: profile.total_xp,
     currentLevel: level,
@@ -167,11 +239,15 @@ async function getXPProfile(supabase, email) {
     documentCount: profile.document_count || 0,
     selfieCount: profile.selfie_count || 0,
     referralCount: profile.referral_count || 0,
+    multiplier: rewardStats.levelMult,
+    streakBonusPercent: rewardStats.streakBonusPercent,
+    totalMultiplier: rewardStats.totalMultiplier,
     recentHistory: history || []
   };
 }
 
 module.exports = {
   awardXP,
-  getXPProfile
+  getXPProfile,
+  calculateFinalTaskReward
 };
