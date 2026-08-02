@@ -7,8 +7,8 @@ const { createClient } = require("@supabase/supabase-js");
 const { ethers } = require("ethers");
 const { GoogleGenAI } = require("@google/genai"); 
 
-// 🚀 XP SYSTEM IMPORT (MODULAR ADDITION)
-const { awardXP, getXPProfile } = require("./xpEngine");
+// 🚀 XP SYSTEM IMPORT (FIXED TO MATCH YOUR EXACT LOWERCASE FILENAME)
+const { awardXP, getXPProfile } = require("./xpengine");
 
 const app = express();
 
