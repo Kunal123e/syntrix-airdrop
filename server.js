@@ -7,8 +7,8 @@ const { createClient } = require("@supabase/supabase-js");
 const { ethers } = require("ethers");
 const { GoogleGenAI } = require("@google/genai"); 
 
-// 🚀 XP SYSTEM IMPORT (FIXED TO MATCH YOUR EXACT LOWERCASE FILENAME)
-const { awardXP, getXPProfile } = require("./xpengine");
+// 🚀 XP SYSTEM IMPORT (FIXED TO MATCH YOUR EXACT LOWERCASE FILENAME & MULTIPLIER ENGINE)
+const { awardXP, getXPProfile, calculateFinalTaskReward } = require("./xpengine");
 
 const app = express();
 
@@ -312,11 +312,15 @@ app.post("/api/submit-survey", async (req, res) => {
       isReferralValid = true;
     }
 
+    // 🚀 DYNAMIC MULTIPLIER PAYOUT CALCULATION
+    const userXpProfile = await getXPProfile(supabase, sanitizedEmail);
+    const surveyRewardInfo = calculateFinalTaskReward(48, userXpProfile ? userXpProfile.currentLevel : 1, userXpProfile ? userXpProfile.dailyStreak : 0);
+
     const { data: claimData, error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([{
         email: sanitizedEmail, 
-        amount_rewarded: 48, 
+        amount_rewarded: surveyRewardInfo.finalReward, 
         status: "pending", 
         referral_code: generatedReferralCode, 
         survey_data: answers,
@@ -353,6 +357,8 @@ app.post("/api/submit-survey", async (req, res) => {
     return res.json({
       success: true,
       referralCode: generatedReferralCode,
+      rewardAmount: surveyRewardInfo.finalReward,
+      multiplierApplied: surveyRewardInfo.totalMultiplier,
       message: "Survey data successfully stored."
     });
 
@@ -369,8 +375,7 @@ app.get("/api/user-status", async (req, res) => {
   try {
     const sanitizedEmail = email.trim().toLowerCase();
 
-    // 🚀 XP HOOK: Award Daily Login XP
-    // Note: We'll pass "login" category, the XP Engine will handle deduplication using last_login logic.
+    // 🚀 XP HOOK: Award Daily Login XP (Handles Streaks & Duplicates via UTC)
     await awardXP(supabase, sanitizedEmail, 10, "Daily Login", "login");
 
     if (ref) {
@@ -869,7 +874,12 @@ async function processSingleJob(job) {
             job.finalEmbedding = embedding;
         }
 
-        // 4. FINAL APPROVAL TO BUCKET
+        // 🚀 4. DYNAMIC MULTIPLIER TOKEN CALCULATION
+        const jobXpProfile = await getXPProfile(supabase, job.email);
+        const taskRewardInfo = calculateFinalTaskReward(48, jobXpProfile ? jobXpProfile.currentLevel : 1, jobXpProfile ? jobXpProfile.dailyStreak : 0);
+        const finalTaskReward = taskRewardInfo.finalReward;
+
+        // 5. FINAL APPROVAL TO BUCKET
         const buffer = Buffer.from(base64Data, "base64");
         const storagePath = `${job.email}/${Date.now()}_${job.file_name}`;
         
@@ -889,16 +899,16 @@ async function processSingleJob(job) {
                 temp_base64: null, 
                 storage_url: publicUrlData.publicUrl, 
                 embedding: job.finalEmbedding, 
-                reward_amount: 48, 
-                reason: job.finalReason 
+                reward_amount: finalTaskReward, 
+                reason: `${job.finalReason} | Paid ${finalTaskReward} SYNX (${taskRewardInfo.totalMultiplier}x Boost)` 
             })
             .eq("id", job.id);
 
         const { data: userData } = await supabase.from('users').select('pendingRewards').eq('email', job.email).single();
         if(userData) {
-            await supabase.from('users').update({ pendingRewards: (userData.pendingRewards || 0) + 48 }).eq('email', job.email);
+            await supabase.from('users').update({ pendingRewards: (userData.pendingRewards || 0) + finalTaskReward }).eq('email', job.email);
         } else {
-            await supabase.from('users').insert([{ email: job.email, pendingRewards: 48 }]);
+            await supabase.from('users').insert([{ email: job.email, pendingRewards: finalTaskReward }]);
         }
 
         // 🚀 XP HOOK: Award XP based on verified mode
