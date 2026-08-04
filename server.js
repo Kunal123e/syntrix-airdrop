@@ -794,7 +794,7 @@ async function processSingleJob(job) {
         // 2. THE COMBINED PII & QUALITY BOUNCER
         const qualityRules = isSelfie 
             ? 'Is it a clear, authentic photograph of a real human face? Provide a specific reason if it fails (e.g., blurry, multiple faces, bad lighting, not a human).' 
-            : `Is this an authentic photo of physical, handwritten notes containing: ${job.contentTags || 'academic content'}? Reject PDFs, screenshots, printed textbook text, or blank pages. Provide a specific reason if it fails (e.g., printed text detected, blurry, off-topic).`;
+            : `Is this an authentic photo of physical, handwritten notes containing: ${job.contentTags || 'academic content'}? Reject PDFs, screenshots, printed textbook text, blank pages, and ABSOLUTELY REJECT any human faces, selfies, or passport-style portrait photos. Provide a specific reason if it fails (e.g., printed text detected, portrait photo detected, off-topic).`;
 
         const combinedPrompt = `You are a strict security and academic AI validator. Evaluate this image for TWO criteria:
         1. QUALITY: ${qualityRules}
@@ -830,29 +830,27 @@ async function processSingleJob(job) {
             return;
         }
 
-        // 3. DUPLICATE SHIELD (SPLIT LOGIC)
+        // 3. UNIVERSAL DUPLICATE SHIELD (APPLIED TO BOTH MODES)
+        // Hash the exact pixels of the image to catch 1:1 duplicate uploads instantly
+        const imageHash = crypto.createHash("sha256").update(base64Data).digest("hex");
+        
+        const { data: exactMatchData } = await supabase
+            .from("syntrix_submissions")
+            .select("id")
+            .like("reason", `%Hash:${imageHash}%`)
+            .limit(1)
+            .maybeSingle();
+
+        if (exactMatchData) {
+            await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate image detected (Hash Match)", temp_base64: null }).eq("id", job.id);
+            return;
+        }
+
         if (isSelfie) {
-            // Selfie: Use Exact Image Pixel Hashing (SHA-256)
-            const imageHash = crypto.createHash("sha256").update(base64Data).digest("hex");
-            
-            // Look for this hash inside the 'reason' column of previous submissions
-            const { data: matchData } = await supabase
-                .from("syntrix_submissions")
-                .select("id")
-                .like("reason", `%Hash:${imageHash}%`)
-                .limit(1)
-                .maybeSingle();
-
-            if (matchData) {
-                await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate image detected (Hash Match)", temp_base64: null }).eq("id", job.id);
-                return;
-            }
-
             job.finalReason = `Verified Successfully | Hash:${imageHash}`;
             job.finalEmbedding = null; 
-
         } else {
-            // Documents: Use Vector DB Embeddings
+            // Documents: Still use Vector DB Embeddings for semantic matching (catching cropped/slightly altered versions)
             const embedRes = await activeAiClient.models.embedContent({
                 model: "gemini-embedding-001", 
                 contents: `Task: ${job.task_type} | User: ${job.email} | ContentTags: ${job.contentTags ? job.contentTags.join(',') : 'none'}`
@@ -870,7 +868,7 @@ async function processSingleJob(job) {
                 return;
             }
             
-            job.finalReason = "Verified Successfully";
+            job.finalReason = `Verified Successfully | Hash:${imageHash}`;
             job.finalEmbedding = embedding;
         }
 
