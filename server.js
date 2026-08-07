@@ -16,7 +16,7 @@ const app = express();
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key", "Origin", "X-Requested-With"]
+  allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key", "Origin", "X-Requested-With", "x-admin-key"]
 }));
 
 // STRICT RULE APPLIED: Limit boosted to 50mb to completely prevent WAF drops
@@ -639,6 +639,13 @@ app.get("/api/check-submission", async (req, res) => {
   }
 });
 
+// Helper: Extract and decode relative storage path from Supabase Public URL
+function getBucketFilePathFromUrl(publicUrl) {
+  if (!publicUrl) return null;
+  const parts = publicUrl.split("/verified_assets/");
+  return parts.length > 1 ? decodeURIComponent(parts[1]) : null;
+}
+
 // ================= 🚀 BACKEND-INTERCEPT BUCKET UPLOAD =================
 app.post("/api/upload-task", async (req, res) => {
   const { userEmail, taskType, fileName, imageBase64, contentTags } = req.body; 
@@ -648,14 +655,17 @@ app.post("/api/upload-task", async (req, res) => {
   }
 
   const sanitizedEmail = userEmail.trim().toLowerCase();
+  
+  // 🚀 FIX: Sanitize the filename to strip out spaces and special characters!
+  const safeFileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
 
   try {
     // 1. Convert Base64 to Buffer
     const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
     const buffer = Buffer.from(base64Data, "base64");
     
-    // 2. Upload directly to Supabase Bucket "pending" folder
-    const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${fileName}`;
+    // 2. Upload directly to Supabase Bucket "pending" folder with SAFE filename
+    const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${safeFileName}`;
     const { error: uploadError } = await supabase.storage
       .from("verified_assets")
       .upload(storagePath, buffer, { contentType: "image/jpeg" });
@@ -669,7 +679,7 @@ app.post("/api/upload-task", async (req, res) => {
     const { error: dbError } = await supabase.from("syntrix_submissions").insert([{
       email: sanitizedEmail,
       task_type: taskType,
-      file_name: fileName,
+      file_name: safeFileName,
       storage_url: publicUrlData.publicUrl, 
       contentTags: contentTags || [],
       status: "pending"
@@ -690,12 +700,6 @@ const aiDocs = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY_DOCS || proc
 const aiSelfies = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY_SELFIES || process.env.GEMINI_API_KEY });
 
 let isTaskProcessing = false;
-
-function getBucketFilePathFromUrl(publicUrl) {
-  if (!publicUrl) return null;
-  const parts = publicUrl.split("/verified_assets/");
-  return parts.length > 1 ? parts[1] : null;
-}
 
 async function processSingleJob(job) {
     const relativeFilePath = getBucketFilePathFromUrl(job.storage_url);
