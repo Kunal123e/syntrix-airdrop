@@ -7,19 +7,19 @@ const { createClient } = require("@supabase/supabase-js");
 const { ethers } = require("ethers");
 const { GoogleGenAI } = require("@google/genai"); 
 
-// 🚀 XP SYSTEM IMPORT (FIXED TO MATCH YOUR EXACT LOWERCASE FILENAME & MULTIPLIER ENGINE)
+// 🚀 XP SYSTEM IMPORT
 const { awardXP, getXPProfile, calculateFinalTaskReward } = require("./xpengine");
 
 const app = express();
 
-// ================= COORD ADJUSTMENTS (CORS & HEADERS) =================
+// ================= CORS & HEADERS =================
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key", "Origin", "X-Requested-With"]
 }));
 
-// STRICT RULE APPLIED: Limit boosted to 50mb to completely prevent Base64 expansion payload crashes and WAF drops
+// STRICT RULE APPLIED: Limit boosted to 50mb to completely prevent WAF drops
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true, parameterLimit: 50000 }));
 
@@ -64,8 +64,6 @@ if (process.env.RPC_URL && process.env.PRIVATE_KEY && process.env.TOKEN_ADDRESS)
 // ================= BREVO HTTP EMAIL API SETUP =================
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const SENDER_NAME = "Syntrix Network";
-
-console.log(`BREVO API KEY FOUND: ${BREVO_API_KEY ? "YES" : "NO"}`);
 
 async function sendEmailHTTP(toEmail, subject, htmlContent) {
   if (!BREVO_API_KEY) {
@@ -137,7 +135,6 @@ async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
 
   try {
     await sendEmailHTTP(referrerEmail, `🎁 You Earned ${rewardAmount} SYNTRIX Tokens`, htmlBody);
-    console.log(`Notification email sent via API to referrer: ${referrerEmail}`);
     return true;
   } catch (error) {
     console.error(`Failed to send API email to ${referrerEmail}:`, error.message);
@@ -181,10 +178,8 @@ app.post("/api/send-otp", async (req, res) => {
 
   try {
     await sendEmailHTTP(sanitizedEmail, `Your Syntrix Verification Code: ${otpCode}`, htmlBody);
-    console.log(`[OTP] Sent via API to ${sanitizedEmail}`);
     return res.json({ success: true, message: "OTP Sent" });
   } catch (err) {
-    console.error(`[OTP] API Delivery Failed for ${sanitizedEmail}:`, err.message);
     return res.status(500).json({ error: "Failed to deliver email via HTTP API." });
   }
 });
@@ -207,14 +202,13 @@ app.post("/api/verify-otp", (req, res) => {
   return res.json({ success: true });
 });
 
-// ================= TEST ROUTES =================
+// ================= TEST & UTILITY ROUTES =================
 app.get("/", (req, res) => {
-  res.json({ success: true, message: "Syntrix Referral Backend Operating with Dedicated Queue Architecture" });
+  res.json({ success: true, message: "Syntrix Network API Engine Active" });
 });
 
 app.post("/api/test-email", async (req, res) => {
   const { toEmail } = req.body;
-
   try {
     await sendEmailHTTP(toEmail, "HTTP API TEST", "<p>API connection successful.</p>");
     return res.json({ success: true, message: "HTTP API email sent successfully." });
@@ -223,7 +217,6 @@ app.post("/api/test-email", async (req, res) => {
   }
 });
 
-// ================= SEND INVITE ROUTE =================
 app.post("/api/send-invite", async (req, res) => {
   const { friendEmail, referralCode, referralLink } = req.body;
   if (!friendEmail || !referralCode || !referralLink) {
@@ -246,20 +239,19 @@ app.post("/api/send-invite", async (req, res) => {
   }
 });
 
-// ================= DYNAMIC QR REDIRECTOR =================
 app.get("/r/:refCode", (req, res) => {
   const refCode = req.params.refCode;
   const targetDomain = process.env.FRONTEND_URL || "https://syntrix-airdrop.onrender.com"; 
   res.redirect(302, `${targetDomain}/?ref=${refCode}`);
 });
 
-// ================= SURVEY INGESTION SYSTEM (QUALITY GATE SECURED) =================
+// ================= SURVEY INGESTION SYSTEM =================
 app.post("/api/submit-survey", async (req, res) => {
   try {
     const { email, referredBy, answers, startTime, submissionTime, assignedBadge } = req.body;
 
     if (!startTime || !submissionTime) {
-      return res.status(400).json({ error: "Missing required timing metrics. Please update your client." });
+      return res.status(400).json({ error: "Missing required timing metrics." });
     }
 
     const currentTime = Date.now();
@@ -269,7 +261,7 @@ app.post("/api/submit-survey", async (req, res) => {
 
     const timeTaken = submissionTime - startTime;
     if (timeTaken < 120000) {
-      return res.status(400).json({ error: "Survey completed too quickly. Please take adequate time to provide quality insights." });
+      return res.status(400).json({ error: "Survey completed too quickly. Please take adequate time." });
     }
 
     if (!email) return res.status(400).json({ error: "Email identifier required" });
@@ -297,8 +289,8 @@ app.post("/api/submit-survey", async (req, res) => {
         .eq("referral_code", cleanRefCode)
         .maybeSingle();
 
-      if (refError || !referrerClaim) return res.status(400).json({ error: "Invalid referral code. Code does not exist." });
-      if (referrerClaim.email === sanitizedEmail) return res.status(400).json({ error: "Self-referral check: Code belongs to this email." });
+      if (refError || !referrerClaim) return res.status(400).json({ error: "Invalid referral code." });
+      if (referrerClaim.email === sanitizedEmail) return res.status(400).json({ error: "Self-referral check failed." });
 
       referrerRecord = referrerClaim;
 
@@ -312,11 +304,10 @@ app.post("/api/submit-survey", async (req, res) => {
       isReferralValid = true;
     }
 
-    // 🚀 DYNAMIC MULTIPLIER PAYOUT CALCULATION
     const userXpProfile = await getXPProfile(supabase, sanitizedEmail);
     const surveyRewardInfo = calculateFinalTaskReward(48, userXpProfile ? userXpProfile.currentLevel : 1, userXpProfile ? userXpProfile.dailyStreak : 0);
 
-    const { data: claimData, error: claimError } = await supabase
+    const { error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([{
         email: sanitizedEmail, 
@@ -326,16 +317,10 @@ app.post("/api/submit-survey", async (req, res) => {
         survey_data: answers,
         survey_duration_seconds: Math.floor(timeTaken / 1000), 
         assigned_badge: assignedBadge || "Analyzer" 
-      }])
-      .select("id, email, status, wallet_address")
-      .single();
+      }]);
 
-    if (claimError) {
-      if (claimError.code === "23505") return res.status(400).json({ error: "This email has already submitted the survey." });
-      return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
-    }
+    if (claimError) return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
 
-    // 🚀 XP HOOK: Award +300 XP for Survey Completion
     await awardXP(supabase, sanitizedEmail, 300, "Survey Completed", "survey");
 
     if (isReferralValid && referrerRecord) {
@@ -348,9 +333,7 @@ app.post("/api/submit-survey", async (req, res) => {
         email: referrerRecord.email, reward_type: "referral", amount: 10, status: "pending", claim_token: claimToken
       }]);
 
-      // 🚀 XP HOOK: Award +120 XP for Referral Success
       await awardXP(supabase, referrerRecord.email, 120, "Referral Success", "referral");
-
       await sendRewardNotification(referrerRecord.email, 10, claimToken);
     }
 
@@ -367,40 +350,14 @@ app.post("/api/submit-survey", async (req, res) => {
   }
 });
 
-// ================= PROFILE LOOKUP =================
+// ================= PROFILE & DASHBOARD LOOKUPS =================
 app.get("/api/user-status", async (req, res) => {
-  const { email, ref } = req.query;
+  const { email } = req.query;
   if (!email) return res.status(400).json({ error: "Email parameter required" });
 
   try {
     const sanitizedEmail = email.trim().toLowerCase();
-
-    // 🚀 XP HOOK: Award Daily Login XP (Handles Streaks & Duplicates via UTC)
     await awardXP(supabase, sanitizedEmail, 10, "Daily Login", "login");
-
-    if (ref) {
-      const cleanRefCode = normalizeReferralCode(ref);
-      const generatedReferralCode = generateReferralCode(sanitizedEmail);
-
-      if (cleanRefCode === generatedReferralCode) return res.status(400).json({ error: "You cannot refer yourself." });
-
-      const { data: referrerClaim, error: refError } = await supabase
-        .from("syntrix_claims")
-        .select("email")
-        .eq("referral_code", cleanRefCode)
-        .maybeSingle();
-
-      if (refError || !referrerClaim) return res.status(400).json({ error: "Invalid referral code. Code does not exist." });
-      if (referrerClaim.email === sanitizedEmail) return res.status(400).json({ error: "Self-referral check: Code belongs to this email." });
-
-      const { data: alreadyReferred } = await supabase
-        .from("syntrix_referrals")
-        .select("id")
-        .eq("referred_email", sanitizedEmail)
-        .maybeSingle();
-
-      if (alreadyReferred) return res.status(400).json({ error: "This email has already been referred." });
-    }
 
     const { data: userProfile, error } = await supabase
       .from("syntrix_claims")
@@ -409,15 +366,6 @@ app.get("/api/user-status", async (req, res) => {
       .maybeSingle();
 
     if (error) return res.status(500).json({ error: error.message });
-    
-    const { data: queuedItems } = await supabase.from("syntrix_payout_queue")
-      .select("status, tx_hash")
-      .eq("email", sanitizedEmail)
-      .order("id", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (!userProfile) return res.json({ success: false, exists: false, isClaimed: false, status: "FLOW_C" });
 
     const { count: totalReferrals } = await supabase
       .from("syntrix_referrals")
@@ -425,18 +373,17 @@ app.get("/api/user-status", async (req, res) => {
       .eq("referrer_email", sanitizedEmail);
 
     const { data: rewards } = await supabase.from("syntrix_rewards").select("amount, status").eq("email", sanitizedEmail);
-
     const { data: userTableRecord } = await supabase.from("users").select("pendingRewards, claimedRewards").eq("email", sanitizedEmail).maybeSingle();
+    const { data: queuedItems } = await supabase.from("syntrix_payout_queue").select("status, tx_hash").eq("email", sanitizedEmail).order("id", { ascending: false }).limit(1).maybeSingle();
 
     let pendingRewards = 0, claimedRewards = 0;
-    
-    const surveyAmount = userProfile.amount_rewarded || 48;
-    if (userProfile.status === "pending" || userProfile.status === "processing") {
-      pendingRewards += Number(surveyAmount);
-    } else if (userProfile.status === "success") {
-      claimedRewards += Number(surveyAmount);
+    const surveyAmount = userProfile ? (userProfile.amount_rewarded || 48) : 48;
+
+    if (userProfile) {
+      if (userProfile.status === "pending" || userProfile.status === "processing") pendingRewards += Number(surveyAmount);
+      else if (userProfile.status === "success") claimedRewards += Number(surveyAmount);
     }
-    
+
     if (rewards) {
       rewards.forEach(r => {
         if (r.status === "pending" || r.status === "processing") pendingRewards += Number(r.amount);
@@ -445,13 +392,13 @@ app.get("/api/user-status", async (req, res) => {
     }
 
     if (userTableRecord) {
-        pendingRewards += Number(userTableRecord.pendingRewards || 0);
-        claimedRewards += Number(userTableRecord.claimedRewards || 0);
+      pendingRewards += Number(userTableRecord.pendingRewards || 0);
+      claimedRewards += Number(userTableRecord.claimedRewards || 0);
     }
 
-    const isClaimed = userProfile.status === "success" || 
-                      !!(userProfile.tx_hash || userProfile.wallet_address) ||
-                      (queuedItems && queuedItems.status === "success");
+    if (!userProfile) return res.json({ success: false, exists: false, isClaimed: false, status: "FLOW_C" });
+
+    const isClaimed = userProfile.status === "success" || !!(userProfile.tx_hash || userProfile.wallet_address) || (queuedItems && queuedItems.status === "success");
 
     return res.json({
       success: true,
@@ -468,7 +415,7 @@ app.get("/api/user-status", async (req, res) => {
     });
 
   } catch (err) {
-    return res.status(500).json({ error: err.message || "Dashboard authentication processing failure" });
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -487,11 +434,7 @@ app.get("/api/claim-details", async (req, res) => {
     if (error || !reward) return res.status(404).json({ error: "Invalid claim token or reward record not found." });
 
     return res.json({
-      success: true, 
-      email: reward.email, 
-      amount: reward.amount, 
-      type: reward.reward_type, 
-      status: reward.status
+      success: true, email: reward.email, amount: reward.amount, type: reward.reward_type, status: reward.status
     });
   } catch (err) {
     return res.status(500).json({ error: "Internal server error reading token properties." });
@@ -537,11 +480,7 @@ app.post("/api/execute-claim", async (req, res) => {
     if (itemInQueue) return res.status(400).json({ error: "This distribution request is already queued for processing." });
 
     await supabase.from("syntrix_payout_queue").insert([{
-      email: email,
-      wallet_address: sanitizedWallet,
-      reward_amount: Number(rewardRecord.amount),
-      claim_token: token.trim(),
-      status: "queued"
+      email: email, wallet_address: sanitizedWallet, reward_amount: Number(rewardRecord.amount), claim_token: token.trim(), status: "queued"
     }]);
 
     await supabase.from("syntrix_rewards").update({ status: "processing" }).eq("id", rewardRecord.id);
@@ -579,11 +518,7 @@ app.post("/api/claim-reward", async (req, res) => {
 
     const rewardAmount = userRecord.amount_rewarded || 48;
     await supabase.from("syntrix_payout_queue").insert([{
-      email: sanitizedEmail,
-      wallet_address: sanitizedWallet,
-      reward_amount: rewardAmount,
-      claim_token: `SURVEY-LAZY-${crypto.randomBytes(8).toString('hex').toUpperCase()}`,
-      status: "queued"
+      email: sanitizedEmail, wallet_address: sanitizedWallet, reward_amount: rewardAmount, claim_token: `SURVEY-LAZY-${crypto.randomBytes(8).toString('hex').toUpperCase()}`, status: "queued"
     }]);
 
     await supabase.from("syntrix_claims").update({ status: "processing" }).eq("id", userRecord.id);
@@ -665,16 +600,13 @@ async function processPayoutQueueEngine() {
 
 async function finalizeSuccessfulQueueJob(job, txHash) {
   await supabase.from("syntrix_payout_queue").update({
-    status: "success",
-    tx_hash: txHash,
-    processed_at: new Date().toISOString()
+    status: "success", tx_hash: txHash, processed_at: new Date().toISOString()
   }).eq("id", job.id);
 
   if (job.claim_token.startsWith("SURVEY-LAZY-")) {
     await supabase.from("syntrix_claims").update({ wallet_address: job.wallet_address, tx_hash: txHash, status: "success" }).eq("email", job.email);
   } else {
     await supabase.from("syntrix_rewards").update({ tx_hash: txHash, claimed_wallet: job.wallet_address, claimed_at: new Date().toISOString(), status: "claimed" }).eq("claim_token", job.claim_token);
-    
     await supabase.from("syntrix_referrals").update({ status: "claimed" }).eq("claim_token", job.claim_token);
     await supabase.from("syntrix_claims").update({ wallet_address: job.wallet_address, tx_hash: txHash, status: "success" }).eq("email", job.email);
   }
@@ -707,7 +639,7 @@ app.get("/api/check-submission", async (req, res) => {
   }
 });
 
-// ================= DOCUMENT MODE: WAITING ROOM INGESTION =================
+// ================= 🚀 BACKEND-INTERCEPT BUCKET UPLOAD =================
 app.post("/api/upload-task", async (req, res) => {
   const { userEmail, taskType, fileName, imageBase64, contentTags } = req.body; 
 
@@ -718,238 +650,174 @@ app.post("/api/upload-task", async (req, res) => {
   const sanitizedEmail = userEmail.trim().toLowerCase();
 
   try {
-    if (taskType === "selfie") {
-      const startOfMonth = new Date();
-      startOfMonth.setDate(1);
-      startOfMonth.setHours(0, 0, 0, 0);
+    // 1. Convert Base64 to Buffer
+    const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
+    const buffer = Buffer.from(base64Data, "base64");
+    
+    // 2. Upload directly to Supabase Bucket "pending" folder
+    const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${fileName}`;
+    const { error: uploadError } = await supabase.storage
+      .from("verified_assets")
+      .upload(storagePath, buffer, { contentType: "image/jpeg" });
 
-      const { count, error: countError } = await supabase
-        .from("syntrix_submissions")
-        .select("*", { count: "exact", head: true })
-        .eq("email", sanitizedEmail)
-        .eq("task_type", "selfie")
-        .gte("created_at", startOfMonth.toISOString());
+    if (uploadError) throw new Error(`Bucket upload failed: ${uploadError.message}`);
 
-      if (countError) throw countError;
+    // 3. Get Public URL
+    const { data: publicUrlData } = supabase.storage.from("verified_assets").getPublicUrl(storagePath);
 
-      // Limit removed for testing!
-      if (count >= 100) {
-        return res.status(403).json({ error: "Monthly limit reached. Come back next month!" });
-      }
-    }
-
-    const { error } = await supabase.from("syntrix_submissions").insert([{
+    // 4. Save tiny URL to Database (NO BLOAT!)
+    const { error: dbError } = await supabase.from("syntrix_submissions").insert([{
       email: sanitizedEmail,
       task_type: taskType,
       file_name: fileName,
-      temp_base64: imageBase64,
-      contentTags: contentTags,
+      storage_url: publicUrlData.publicUrl, 
+      contentTags: contentTags || [],
       status: "pending"
     }]);
 
-    if (error) throw error;
+    if (dbError) throw dbError;
 
-    res.json({ success: true, message: "Queued for Verification" });
-
+    res.json({ success: true, message: "Queued for AI Verification" });
     processTaskQueueEngine();
 
   } catch (err) {
-    return res.status(500).json({ error: "Waiting room ingestion failed: " + err.message });
+    return res.status(500).json({ error: "Ingestion failed: " + err.message });
   }
 });
 
-// ================= DOCUMENT MODE: DUAL API KEY BACKGROUND AI WORKER =================
-
-// Initialize Two Distinct AI Clients
+// ================= 🚀 BUCKET-FED AI WORKER ENGINE =================
 const aiDocs = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY_DOCS || process.env.GEMINI_API_KEY });
 const aiSelfies = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY_SELFIES || process.env.GEMINI_API_KEY });
 
 let isTaskProcessing = false;
 
+function getBucketFilePathFromUrl(publicUrl) {
+  if (!publicUrl) return null;
+  const parts = publicUrl.split("/verified_assets/");
+  return parts.length > 1 ? parts[1] : null;
+}
+
 async function processSingleJob(job) {
+    const relativeFilePath = getBucketFilePathFromUrl(job.storage_url);
+    const isSelfie = job.task_type === 'selfie';
+    const activeAiClient = isSelfie ? aiSelfies : aiDocs;
+
     try {
-        const base64Data = job.temp_base64.replace(/^data:(image|application)\/\w+;base64,/, "");
-        const isSelfie = job.task_type === 'selfie';
-        
-        // Select appropriate AI Client based on task type
-        const activeAiClient = isSelfie ? aiSelfies : aiDocs;
+        // 1. Fetch image from Bucket into temporary RAM
+        const imageResponse = await fetch(job.storage_url);
+        if (!imageResponse.ok) throw new Error("Failed to fetch image from bucket.");
+        const arrayBuffer = await imageResponse.arrayBuffer();
+        const imageBuffer = Buffer.from(arrayBuffer);
+        const base64Data = imageBuffer.toString("base64");
 
-        // 1. Daily Quota Check
-        if (isSelfie) {
-            const today = new Date().toISOString().split('T')[0];
-            const { count: dailyCount } = await supabase
-                .from('syntrix_submissions')
-                .select('*', { count: 'exact', head: true })
-                .eq('email', job.email)
-                .eq('task_type', 'selfie')
-                .in('status', ['pending', 'approved', 'verified'])
-                .gte('created_at', today);
-
-            if (dailyCount > 100) { 
-                await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: 'Daily limit reached', temp_base64: null }).eq('id', job.id);
-                return;
-            }
-        }
-
-        // 2. THE COMBINED PII & QUALITY BOUNCER
+        // 2. AI EVALUATION
         const qualityRules = isSelfie 
-            ? 'Is it a clear, authentic photograph of a real human face? Provide a specific reason if it fails (e.g., blurry, multiple faces, bad lighting, not a human).' 
-            : `Is this an authentic photo of physical, handwritten notes containing: ${job.contentTags || 'academic content'}? Reject PDFs, screenshots, printed textbook text, blank pages, and ABSOLUTELY REJECT any human faces, selfies, or passport-style portrait photos. Provide a specific reason if it fails (e.g., printed text detected, portrait photo detected, off-topic).`;
+            ? 'Is it a clear, authentic photograph of a real human face? Provide a specific reason if it fails.' 
+            : `Is this an authentic photo of physical, handwritten notes containing: ${job.contentTags || 'academic content'}? Reject PDFs, screenshots, printed textbook text, blank pages, and ABSOLUTELY REJECT any human faces, selfies, or passport-style portrait photos.`;
 
-        const combinedPrompt = `You are a strict security and academic AI validator. Evaluate this image for TWO criteria:
+        const combinedPrompt = `You are a strict security AI validator. Evaluate this image for:
         1. QUALITY: ${qualityRules}
-        2. PII: Does this image contain Sensitive Personal Identifiable Information (PII) like a real person's private phone number or physical home address? (CRITICAL RULE: Ignore generic brand names, logos on clothing, printed textbook author names, and math numbers. Only flag actual private user data).
-        Respond STRICTLY with valid JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason for failure or success"}`;
+        2. PII: Does this image contain Sensitive Personal Identifiable Information (phone numbers, addresses)?
+        Respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason"}`;
         
         const response = await activeAiClient.models.generateContent({
             model: 'gemini-2.5-flash', 
-            contents: [
-                { text: combinedPrompt },
-                { inlineData: { mimeType: 'image/jpeg', data: base64Data } }
-            ],
-            config: {
-                responseMimeType: "application/json",
-            }
+            contents: [ { text: combinedPrompt }, { inlineData: { mimeType: 'image/jpeg', data: base64Data } } ],
+            config: { responseMimeType: "application/json" }
         });
 
-        const responseTextStr = response.text;
-        let aiVerdict;
-        try {
-            aiVerdict = JSON.parse(responseTextStr.trim());
-        } catch (parseErr) {
-            throw new Error(`AI generated invalid JSON payload: ${parseErr.message}`);
-        }
+        const aiVerdict = JSON.parse(response.text.trim());
 
-        if (aiVerdict.contains_pii === true) {
-            await supabase.from('syntrix_submissions').update({ status: 'rejected_pii', reason: 'Contains Sensitive PII', temp_base64: null }).eq('id', job.id);
+        // 🔴 REJECTION (Delete file from Bucket)
+        if (aiVerdict.contains_pii || !aiVerdict.quality_pass) {
+            const rejectReason = aiVerdict.contains_pii ? 'Contains Sensitive PII' : aiVerdict.reason;
+            const rejectStatus = aiVerdict.contains_pii ? 'rejected_pii' : 'rejected';
+            
+            if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
+            await supabase.from('syntrix_submissions').update({ status: rejectStatus, reason: rejectReason }).eq('id', job.id);
             return;
         }
 
-        if (aiVerdict.quality_pass === false) {
-            await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: aiVerdict.reason || 'Failed AI quality guidelines', temp_base64: null }).eq('id', job.id);
-            return;
-        }
+        // 3. PIXEL HASH DUPLICATE CHECK
+        const imageHash = crypto.createHash("sha256").update(imageBuffer).digest("hex");
+        const { data: exactMatchData } = await supabase.from("syntrix_submissions").select("id").like("reason", `%Hash:${imageHash}%`).limit(1).maybeSingle();
 
-        // 3. UNIVERSAL DUPLICATE SHIELD (APPLIED TO BOTH MODES)
-        // Hash the exact pixels of the image to catch 1:1 duplicate uploads instantly
-        const imageHash = crypto.createHash("sha256").update(base64Data).digest("hex");
-        
-        const { data: exactMatchData } = await supabase
-            .from("syntrix_submissions")
-            .select("id")
-            .like("reason", `%Hash:${imageHash}%`)
-            .limit(1)
-            .maybeSingle();
-
+        // 🔴 REJECTION (Delete Duplicate)
         if (exactMatchData) {
-            await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate image detected (Hash Match)", temp_base64: null }).eq("id", job.id);
+            if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
+            await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate image detected (Hash Match)" }).eq("id", job.id);
             return;
         }
 
-        if (isSelfie) {
-            job.finalReason = `Verified Successfully | Hash:${imageHash}`;
-            job.finalEmbedding = null; 
-        } else {
-            // Documents: Still use Vector DB Embeddings for semantic matching (catching cropped/slightly altered versions)
+        let finalEmbedding = null;
+        if (!isSelfie) {
             const embedRes = await activeAiClient.models.embedContent({
-                model: "gemini-embedding-001", 
-                contents: `Task: ${job.task_type} | User: ${job.email} | ContentTags: ${job.contentTags ? job.contentTags.join(',') : 'none'}`
+                model: "gemini-embedding-001", contents: `Task: ${job.task_type} | User: ${job.email}`
             });
-            const embedding = embedRes.embeddings[0].values;
+            finalEmbedding = embedRes.embeddings[0].values;
+            const { data: matchData } = await supabase.rpc("match_homework_vectors", { query_embedding: finalEmbedding, match_threshold: 0.98, match_count: 1 });
 
-            const { data: matchData } = await supabase.rpc("match_homework_vectors", {
-                query_embedding: embedding,
-                match_threshold: 0.98,
-                match_count: 1
-            });
-
+            // 🔴 REJECTION (Delete Semantic Duplicate)
             if (matchData && matchData.length > 0) {
-                await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate metadata detected (Vector Match)", temp_base64: null }).eq("id", job.id);
+                if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
+                await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate metadata detected (Vector Match)" }).eq("id", job.id);
                 return;
             }
-            
-            job.finalReason = `Verified Successfully | Hash:${imageHash}`;
-            job.finalEmbedding = embedding;
         }
 
-        // 🚀 4. DYNAMIC MULTIPLIER TOKEN CALCULATION
+        // 🟢 APPROVAL (Move file to verified folder)
+        const verifiedPath = `verified/${job.email}/${Date.now()}_${job.file_name}`;
+        if (relativeFilePath) {
+            await supabase.storage.from("verified_assets").move(relativeFilePath, verifiedPath);
+        }
+        const { data: finalUrlData } = supabase.storage.from("verified_assets").getPublicUrl(verifiedPath);
+
         const jobXpProfile = await getXPProfile(supabase, job.email);
         const taskRewardInfo = calculateFinalTaskReward(48, jobXpProfile ? jobXpProfile.currentLevel : 1, jobXpProfile ? jobXpProfile.dailyStreak : 0);
-        const finalTaskReward = taskRewardInfo.finalReward;
 
-        // 5. FINAL APPROVAL TO BUCKET
-        const buffer = Buffer.from(base64Data, "base64");
-        const storagePath = `${job.email}/${Date.now()}_${job.file_name}`;
-        
-        const { error: uploadError } = await supabase.storage
-          .from("verified_assets")
-          .upload(storagePath, buffer, { contentType: "image/jpeg" });
-
-        if (uploadError) throw uploadError;
-
-        const { data: publicUrlData } = supabase.storage
-          .from("verified_assets")
-          .getPublicUrl(storagePath);
-
-        await supabase.from("syntrix_submissions")
-            .update({ 
-                status: "verified", 
-                temp_base64: null, 
-                storage_url: publicUrlData.publicUrl, 
-                embedding: job.finalEmbedding, 
-                reward_amount: finalTaskReward, 
-                reason: `${job.finalReason} | Paid ${finalTaskReward} SYNX (${taskRewardInfo.totalMultiplier}x Boost)` 
-            })
-            .eq("id", job.id);
+        await supabase.from("syntrix_submissions").update({ 
+            status: "verified", 
+            storage_url: finalUrlData.publicUrl, 
+            embedding: finalEmbedding, 
+            reward_amount: taskRewardInfo.finalReward, 
+            reason: `Verified Successfully | Hash:${imageHash} | Paid ${taskRewardInfo.finalReward} SYNX` 
+        }).eq("id", job.id);
 
         const { data: userData } = await supabase.from('users').select('pendingRewards').eq('email', job.email).single();
         if(userData) {
-            await supabase.from('users').update({ pendingRewards: (userData.pendingRewards || 0) + finalTaskReward }).eq('email', job.email);
+            await supabase.from('users').update({ pendingRewards: (userData.pendingRewards || 0) + taskRewardInfo.finalReward }).eq('email', job.email);
         } else {
-            await supabase.from('users').insert([{ email: job.email, pendingRewards: finalTaskReward }]);
+            await supabase.from('users').insert([{ email: job.email, pendingRewards: taskRewardInfo.finalReward }]);
         }
 
-        // 🚀 XP HOOK: Award XP based on verified mode
-        const xpAmount = isSelfie ? 60 : 70;
-        const xpReason = isSelfie ? "Selfie Verified" : "Document Verified";
-        await awardXP(supabase, job.email, xpAmount, xpReason, isSelfie ? "selfie" : "document");
+        await awardXP(supabase, job.email, isSelfie ? 60 : 70, isSelfie ? "Selfie Verified" : "Document Verified", isSelfie ? "selfie" : "document");
 
     } catch (jobErr) { 
         console.error(`Job ${job.id} error:`, jobErr.message); 
-        await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: `System Error: ${jobErr.message}`, temp_base64: null }).eq('id', job.id);
+        if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]).catch(()=>{});
+        await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: `System Error: ${jobErr.message}` }).eq('id', job.id);
     }
 }
 
 async function processTaskQueueEngine() {
   if (isTaskProcessing) return;
   isTaskProcessing = true;
-
   try {
-    const { data: jobs, error } = await supabase
-      .from("syntrix_submissions")
-      .select("*")
-      .eq("status", "pending")
-      .order('created_at', { ascending: true })
-      .limit(5);
-
+    const { data: jobs, error } = await supabase.from("syntrix_submissions").select("*").eq("status", "pending").order('created_at', { ascending: true }).limit(5);
     if (error || !jobs || jobs.length === 0) { isTaskProcessing = false; return; }
-
     await Promise.allSettled(jobs.map(job => processSingleJob(job)));
-
   } catch (err) { 
       console.error("Worker Crash:", err.message); 
   } finally { 
       isTaskProcessing = false; 
   }
 }
-
 setInterval(processTaskQueueEngine, 5000);
 
-// ================= XP PROFILE LOOKUP ROUTE =================
+// ================= XP PROFILE =================
 app.get("/api/xp-profile", async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).json({ error: "Email parameter required" });
-
   try {
     const profile = await getXPProfile(supabase, email);
     return res.json({ success: true, profile });
@@ -957,6 +825,8 @@ app.get("/api/xp-profile", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// ===================== SERVER INITIALIZATION ===============================
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
