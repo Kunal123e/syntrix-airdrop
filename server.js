@@ -643,6 +643,7 @@ app.get("/api/check-submission", async (req, res) => {
 function getBucketFilePathFromUrl(publicUrl) {
   if (!publicUrl) return null;
   const parts = publicUrl.split("/verified_assets/");
+  // 🚀 FIX: Decodes URI spaces (%20) to ensure bucket paths resolve properly for deletion
   return parts.length > 1 ? decodeURIComponent(parts[1]) : null;
 }
 
@@ -827,6 +828,75 @@ app.get("/api/xp-profile", async (req, res) => {
     return res.json({ success: true, profile });
   } catch (err) {
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================================
+// 🛡️ GOD MODE: SECURE ADMIN PANEL ROUTES
+// =========================================================================
+
+function verifyAdminAccess(req, res, next) {
+  const adminKey = req.headers['x-admin-key'];
+  const correctKey = process.env.ADMIN_SECRET_KEY;
+  
+  if (!correctKey) {
+    return res.status(500).json({ error: "Admin secret key not configured on server." });
+  }
+  
+  if (!adminKey || adminKey !== correctKey) {
+    return res.status(403).json({ error: "Access Denied: Invalid Security Credentials." });
+  }
+  next();
+}
+
+app.post("/api/admin/login", (req, res) => {
+  const { password } = req.body;
+  if (password === process.env.ADMIN_SECRET_KEY) {
+    res.json({ success: true, token: password });
+  } else {
+    res.status(401).json({ success: false, error: "Invalid admin password." });
+  }
+});
+
+app.get("/api/admin/stats", verifyAdminAccess, async (req, res) => {
+  try {
+    const { count: totalSubmissions } = await supabase.from('syntrix_submissions').select('*', { count: 'exact', head: true });
+    const { count: pendingSubmissions } = await supabase.from('syntrix_submissions').select('*', { count: 'exact', head: true }).eq('status', 'pending');
+    const { data: users } = await supabase.from('users').select('pendingRewards');
+    
+    let totalTokens = 0;
+    if (users) {
+      users.forEach(u => totalTokens += (u.pendingRewards || 0));
+    }
+
+    res.json({ success: true, stats: { totalSubmissions, pendingSubmissions, totalTokens, totalUsers: users ? users.length : 0 } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/admin/submissions", verifyAdminAccess, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('syntrix_submissions')
+      .select('id, email, task_type, status, reason, storage_url, created_at') 
+      .order('created_at', { ascending: false })
+      .limit(50);
+      
+    if (error) throw error;
+    res.json({ success: true, submissions: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/override", verifyAdminAccess, async (req, res) => {
+  const { id, newStatus, reason } = req.body;
+  try {
+    await supabase.from('syntrix_submissions').update({ status: newStatus, reason: reason }).eq('id', id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
