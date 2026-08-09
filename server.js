@@ -643,7 +643,6 @@ app.get("/api/check-submission", async (req, res) => {
 function getBucketFilePathFromUrl(publicUrl) {
   if (!publicUrl) return null;
   const parts = publicUrl.split("/verified_assets/");
-  // 🚀 FIX: Decodes URI spaces (%20) to ensure bucket paths resolve properly for deletion
   return parts.length > 1 ? decodeURIComponent(parts[1]) : null;
 }
 
@@ -657,7 +656,7 @@ app.post("/api/upload-task", async (req, res) => {
 
   const sanitizedEmail = userEmail.trim().toLowerCase();
   
-  // 🚀 FIX: Sanitize the filename to strip out spaces and special characters!
+  // Sanitize the filename to strip out spaces and special characters!
   const safeFileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
 
   try {
