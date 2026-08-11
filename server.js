@@ -5,9 +5,9 @@ const cors = require("cors");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 const { ethers } = require("ethers");
-const { GoogleGenAI } = require("@google/genai"); 
+const { GoogleGenAI } = require("@google/genai");
 
-// 🚀 XP SYSTEM IMPORT
+// XP SYSTEM IMPORT
 const { awardXP, getXPProfile, calculateFinalTaskReward } = require("./xpengine");
 
 const app = express();
@@ -36,7 +36,7 @@ app.use((req, res, next) => {
 // ================= SUPABASE CLIENT =================
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE 
+  process.env.SUPABASE_SERVICE_ROLE
 );
 
 // ================= POLYGON CONFIGURATION =================
@@ -134,7 +134,7 @@ async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
   `;
 
   try {
-    await sendEmailHTTP(referrerEmail, `🎁 You Earned ${rewardAmount} SYNTRIX Tokens`, htmlBody);
+    await sendEmailHTTP(referrerEmail, `You Earned ${rewardAmount} SYNTRIX Tokens`, htmlBody);
     return true;
   } catch (error) {
     console.error(`Failed to send API email to ${referrerEmail}:`, error.message);
@@ -159,10 +159,10 @@ app.post("/api/send-otp", async (req, res) => {
 
   const sanitizedEmail = email.trim().toLowerCase();
   const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-  
+
   otpStorage[sanitizedEmail] = {
     otp: otpCode,
-    expires: Date.now() + 10 * 60 * 1000 
+    expires: Date.now() + 10 * 60 * 1000
   };
 
   const htmlBody = `
@@ -232,7 +232,7 @@ app.post("/api/send-invite", async (req, res) => {
   `;
 
   try {
-    await sendEmailHTTP(friendEmail, "🎁 Join Syntrix and earn token rewards!", htmlBody);
+    await sendEmailHTTP(friendEmail, "Join Syntrix and earn token rewards!", htmlBody);
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -241,7 +241,7 @@ app.post("/api/send-invite", async (req, res) => {
 
 app.get("/r/:refCode", (req, res) => {
   const refCode = req.params.refCode;
-  const targetDomain = process.env.FRONTEND_URL || "https://syntrix-airdrop.onrender.com"; 
+  const targetDomain = process.env.FRONTEND_URL || "https://syntrix-airdrop.onrender.com";
   res.redirect(302, `${targetDomain}/?ref=${refCode}`);
 });
 
@@ -310,13 +310,13 @@ app.post("/api/submit-survey", async (req, res) => {
     const { error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([{
-        email: sanitizedEmail, 
-        amount_rewarded: surveyRewardInfo.finalReward, 
-        status: "pending", 
-        referral_code: generatedReferralCode, 
+        email: sanitizedEmail,
+        amount_rewarded: surveyRewardInfo.finalReward,
+        status: "pending",
+        referral_code: generatedReferralCode,
         survey_data: answers,
-        survey_duration_seconds: Math.floor(timeTaken / 1000), 
-        assigned_badge: assignedBadge || "Analyzer" 
+        survey_duration_seconds: Math.floor(timeTaken / 1000),
+        assigned_badge: assignedBadge || "Analyzer"
       }]);
 
     if (claimError) return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
@@ -533,7 +533,7 @@ app.post("/api/claim-reward", async (req, res) => {
 let isQueueProcessing = false;
 
 async function processPayoutQueueEngine() {
-  if (isQueueProcessing) return; 
+  if (isQueueProcessing) return;
   isQueueProcessing = true;
 
   try {
@@ -567,9 +567,9 @@ async function processPayoutQueueEngine() {
 
       const tx = await tokenContract.transfer(queueJob.wallet_address, amount);
       console.log(`[QUEUE ENGINE] Broadcasted transaction on-chain: ${tx.hash}.`);
-      
+
       await supabase.from("syntrix_payout_queue").update({
-        status: "processing", 
+        status: "processing",
         tx_hash: tx.hash
       }).eq("id", queueJob.id);
 
@@ -577,9 +577,9 @@ async function processPayoutQueueEngine() {
 
     } catch (blockchainError) {
       console.error(`[QUEUE ENGINE ERROR] Processing failure encountered on task ID ${queueJob.id}:`, blockchainError.message);
-      
-      await supabase.from("syntrix_payout_queue").update({ 
-        status: "failed", 
+
+      await supabase.from("syntrix_payout_queue").update({
+        status: "failed",
         error_message: blockchainError.message,
         processed_at: new Date().toISOString()
       }).eq("id", queueJob.id);
@@ -592,7 +592,7 @@ async function processPayoutQueueEngine() {
     }
 
   } catch (engineError) {
-    console.error("[QUEUE ENGINE ENGINE FAILURE CORE CRASH]:", engineError.message);
+    console.error("[QUEUE ENGINE CORE FAILURE]:", engineError.message);
   } finally {
     isQueueProcessing = false;
   }
@@ -646,24 +646,24 @@ function getBucketFilePathFromUrl(publicUrl) {
   return parts.length > 1 ? decodeURIComponent(parts[1]) : null;
 }
 
-// ================= 🚀 BACKEND-INTERCEPT BUCKET UPLOAD =================
+// ================= BACKEND-INTERCEPT BUCKET UPLOAD =================
 app.post("/api/upload-task", async (req, res) => {
-  const { userEmail, taskType, fileName, imageBase64, contentTags } = req.body; 
+  const { userEmail, taskType, fileName, imageBase64, contentTags } = req.body;
 
   if (!userEmail || !taskType || !fileName || !imageBase64) {
     return res.status(400).json({ error: "Missing required document fields." });
   }
 
   const sanitizedEmail = userEmail.trim().toLowerCase();
-  
-  // Sanitize the filename to strip out spaces and special characters!
+
+  // Sanitize the filename to strip out spaces and special characters
   const safeFileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
 
   try {
     // 1. Convert Base64 to Buffer
     const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
     const buffer = Buffer.from(base64Data, "base64");
-    
+
     // 2. Upload directly to Supabase Bucket "pending" folder with SAFE filename
     const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${safeFileName}`;
     const { error: uploadError } = await supabase.storage
@@ -675,12 +675,12 @@ app.post("/api/upload-task", async (req, res) => {
     // 3. Get Public URL
     const { data: publicUrlData } = supabase.storage.from("verified_assets").getPublicUrl(storagePath);
 
-    // 4. Save tiny URL to Database (NO BLOAT!)
+    // 4. Save tiny URL to Database (NO BLOAT)
     const { error: dbError } = await supabase.from("syntrix_submissions").insert([{
       email: sanitizedEmail,
       task_type: taskType,
       file_name: safeFileName,
-      storage_url: publicUrlData.publicUrl, 
+      storage_url: publicUrlData.publicUrl,
       contentTags: contentTags || [],
       status: "pending"
     }]);
@@ -695,7 +695,7 @@ app.post("/api/upload-task", async (req, res) => {
   }
 });
 
-// ================= 🚀 BUCKET-FED AI WORKER ENGINE =================
+// ================= BUCKET-FED AI WORKER ENGINE =================
 const aiDocs = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY_DOCS || process.env.GEMINI_API_KEY });
 const aiSelfies = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY_SELFIES || process.env.GEMINI_API_KEY });
 
@@ -715,28 +715,28 @@ async function processSingleJob(job) {
         const base64Data = imageBuffer.toString("base64");
 
         // 2. AI EVALUATION
-        const qualityRules = isSelfie 
-            ? 'Is it a clear, authentic photograph of a real human face? Provide a specific reason if it fails.' 
+        const qualityRules = isSelfie
+            ? 'Is it a clear, authentic photograph of a real human face? Provide a specific reason if it fails.'
             : `Is this an authentic photo of physical, handwritten notes containing: ${job.contentTags || 'academic content'}? Reject PDFs, screenshots, printed textbook text, blank pages, and ABSOLUTELY REJECT any human faces, selfies, or passport-style portrait photos.`;
 
         const combinedPrompt = `You are a strict security AI validator. Evaluate this image for:
         1. QUALITY: ${qualityRules}
         2. PII: Does this image contain Sensitive Personal Identifiable Information (phone numbers, addresses)?
         Respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason"}`;
-        
+
         const response = await activeAiClient.models.generateContent({
-            model: 'gemini-2.5-flash', 
+            model: 'gemini-2.5-flash',
             contents: [ { text: combinedPrompt }, { inlineData: { mimeType: 'image/jpeg', data: base64Data } } ],
             config: { responseMimeType: "application/json" }
         });
 
         const aiVerdict = JSON.parse(response.text.trim());
 
-        // 🔴 REJECTION (Delete file from Bucket)
+        // REJECTION (Delete file from Bucket)
         if (aiVerdict.contains_pii || !aiVerdict.quality_pass) {
             const rejectReason = aiVerdict.contains_pii ? 'Contains Sensitive PII' : aiVerdict.reason;
             const rejectStatus = aiVerdict.contains_pii ? 'rejected_pii' : 'rejected';
-            
+
             if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
             await supabase.from('syntrix_submissions').update({ status: rejectStatus, reason: rejectReason }).eq('id', job.id);
             return;
@@ -746,7 +746,7 @@ async function processSingleJob(job) {
         const imageHash = crypto.createHash("sha256").update(imageBuffer).digest("hex");
         const { data: exactMatchData } = await supabase.from("syntrix_submissions").select("id").like("reason", `%Hash:${imageHash}%`).limit(1).maybeSingle();
 
-        // 🔴 REJECTION (Delete Duplicate)
+        // REJECTION (Delete Duplicate)
         if (exactMatchData) {
             if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
             await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate image detected (Hash Match)" }).eq("id", job.id);
@@ -761,7 +761,7 @@ async function processSingleJob(job) {
             finalEmbedding = embedRes.embeddings[0].values;
             const { data: matchData } = await supabase.rpc("match_homework_vectors", { query_embedding: finalEmbedding, match_threshold: 0.98, match_count: 1 });
 
-            // 🔴 REJECTION (Delete Semantic Duplicate)
+            // REJECTION (Delete Semantic Duplicate)
             if (matchData && matchData.length > 0) {
                 if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
                 await supabase.from("syntrix_submissions").update({ status: "fraud", reason: "Duplicate metadata detected (Vector Match)" }).eq("id", job.id);
@@ -769,7 +769,7 @@ async function processSingleJob(job) {
             }
         }
 
-        // 🟢 APPROVAL (Move file to verified folder)
+        // APPROVAL (Move file to verified folder)
         const verifiedPath = `verified/${job.email}/${Date.now()}_${job.file_name}`;
         if (relativeFilePath) {
             await supabase.storage.from("verified_assets").move(relativeFilePath, verifiedPath);
@@ -779,12 +779,12 @@ async function processSingleJob(job) {
         const jobXpProfile = await getXPProfile(supabase, job.email);
         const taskRewardInfo = calculateFinalTaskReward(48, jobXpProfile ? jobXpProfile.currentLevel : 1, jobXpProfile ? jobXpProfile.dailyStreak : 0);
 
-        await supabase.from("syntrix_submissions").update({ 
-            status: "verified", 
-            storage_url: finalUrlData.publicUrl, 
-            embedding: finalEmbedding, 
-            reward_amount: taskRewardInfo.finalReward, 
-            reason: `Verified Successfully | Hash:${imageHash} | Paid ${taskRewardInfo.finalReward} SYNX` 
+        await supabase.from("syntrix_submissions").update({
+            status: "verified",
+            storage_url: finalUrlData.publicUrl,
+            embedding: finalEmbedding,
+            reward_amount: taskRewardInfo.finalReward,
+            reason: `Verified Successfully | Hash:${imageHash} | Paid ${taskRewardInfo.finalReward} SYNX`
         }).eq("id", job.id);
 
         const { data: userData } = await supabase.from('users').select('pendingRewards').eq('email', job.email).single();
@@ -796,8 +796,8 @@ async function processSingleJob(job) {
 
         await awardXP(supabase, job.email, isSelfie ? 60 : 70, isSelfie ? "Selfie Verified" : "Document Verified", isSelfie ? "selfie" : "document");
 
-    } catch (jobErr) { 
-        console.error(`Job ${job.id} error:`, jobErr.message); 
+    } catch (jobErr) {
+        console.error(`Job ${job.id} error:`, jobErr.message);
         if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]).catch(()=>{});
         await supabase.from('syntrix_submissions').update({ status: 'rejected', reason: `System Error: ${jobErr.message}` }).eq('id', job.id);
     }
@@ -810,10 +810,10 @@ async function processTaskQueueEngine() {
     const { data: jobs, error } = await supabase.from("syntrix_submissions").select("*").eq("status", "pending").order('created_at', { ascending: true }).limit(5);
     if (error || !jobs || jobs.length === 0) { isTaskProcessing = false; return; }
     await Promise.allSettled(jobs.map(job => processSingleJob(job)));
-  } catch (err) { 
-      console.error("Worker Crash:", err.message); 
-  } finally { 
-      isTaskProcessing = false; 
+  } catch (err) {
+      console.error("Worker Crash:", err.message);
+  } finally {
+      isTaskProcessing = false;
   }
 }
 setInterval(processTaskQueueEngine, 5000);
@@ -831,71 +831,204 @@ app.get("/api/xp-profile", async (req, res) => {
 });
 
 // =========================================================================
-// 🛡️ GOD MODE: SECURE ADMIN PANEL ROUTES
+// GOD MODE: SECURE ADMIN PANEL ROUTES
 // =========================================================================
 
+// -- Admin Auth Middleware --
+// Reads x-admin-key header and validates against ADMIN_SECRET_KEY env var.
+// Protects all /api/admin/* routes except /api/admin/login.
 function verifyAdminAccess(req, res, next) {
-  const adminKey = req.headers['x-admin-key'];
-  const correctKey = process.env.ADMIN_SECRET_KEY;
-  
+  var adminKey = req.headers['x-admin-key'];
+  var correctKey = process.env.ADMIN_SECRET_KEY;
+
   if (!correctKey) {
-    return res.status(500).json({ error: "Admin secret key not configured on server." });
+    return res.status(500).json({
+      success: false,
+      error: "Admin secret key not configured on server."
+    });
   }
-  
+
   if (!adminKey || adminKey !== correctKey) {
-    return res.status(403).json({ error: "Access Denied: Invalid Security Credentials." });
+    return res.status(403).json({
+      success: false,
+      error: "Forbidden: Invalid or missing admin key."
+    });
   }
+
   next();
 }
 
-app.post("/api/admin/login", (req, res) => {
-  const { password } = req.body;
-  if (password === process.env.ADMIN_SECRET_KEY) {
-    res.json({ success: true, token: password });
-  } else {
-    res.status(401).json({ success: false, error: "Invalid admin password." });
-  }
-});
-
-app.get("/api/admin/stats", verifyAdminAccess, async (req, res) => {
+// -- POST /api/admin/login --
+// Checks password against ADMIN_SECRET_KEY and returns it as a session token.
+app.post("/api/admin/login", function(req, res) {
   try {
-    const { count: totalSubmissions } = await supabase.from('syntrix_submissions').select('*', { count: 'exact', head: true });
-    const { count: pendingSubmissions } = await supabase.from('syntrix_submissions').select('*', { count: 'exact', head: true }).eq('status', 'pending');
-    const { data: users } = await supabase.from('users').select('pendingRewards');
-    
-    let totalTokens = 0;
-    if (users) {
-      users.forEach(u => totalTokens += (u.pendingRewards || 0));
+    var password = (req.body.password || '').trim();
+
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password is required.'
+      });
     }
 
-    res.json({ success: true, stats: { totalSubmissions, pendingSubmissions, totalTokens, totalUsers: users ? users.length : 0 } });
+    if (password !== process.env.ADMIN_SECRET_KEY) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication denied. Invalid credentials.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      token: password
+    });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[ADMIN LOGIN ERROR]', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error during authentication.'
+    });
   }
 });
 
-app.get("/api/admin/submissions", verifyAdminAccess, async (req, res) => {
+// -- GET /api/admin/stats --
+// Returns aggregate counts for the admin dashboard Bento grid.
+// Tables: syntrix_submissions, users (with pendingRewards column).
+app.get("/api/admin/stats", verifyAdminAccess, async function(req, res) {
   try {
-    const { data, error } = await supabase
+    // Total unique users
+    var usersResult = await supabase
+      .from('users')
+      .select('id', { count: 'exact', head: true });
+    var totalUsers = (usersResult.count !== null && usersResult.count !== undefined)
+      ? usersResult.count
+      : 0;
+
+    // Total submissions
+    var totalResult = await supabase
       .from('syntrix_submissions')
-      .select('id, email, task_type, status, reason, storage_url, created_at') 
+      .select('id', { count: 'exact', head: true });
+    var totalSubmissions = (totalResult.count !== null && totalResult.count !== undefined)
+      ? totalResult.count
+      : 0;
+
+    // Pending submissions
+    var pendingResult = await supabase
+      .from('syntrix_submissions')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'pending');
+    var pendingSubmissions = (pendingResult.count !== null && pendingResult.count !== undefined)
+      ? pendingResult.count
+      : 0;
+
+    // Total SYNX tokens distributed (from users.pendingRewards)
+    var tokensResult = await supabase
+      .from('users')
+      .select('pendingRewards');
+    var totalTokens = 0;
+    if (tokensResult.data && tokensResult.data.length > 0) {
+      totalTokens = tokensResult.data.reduce(function(sum, row) {
+        return sum + (Number(row.pendingRewards) || 0);
+      }, 0);
+    }
+
+    return res.json({
+      success: true,
+      stats: {
+        totalUsers: totalUsers,
+        totalSubmissions: totalSubmissions,
+        pendingSubmissions: pendingSubmissions,
+        totalTokens: totalTokens
+      }
+    });
+
+  } catch (err) {
+    console.error('[ADMIN STATS ERROR]', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch stats: ' + err.message
+    });
+  }
+});
+
+// -- GET /api/admin/submissions --
+// Returns the latest 50 submissions ordered by creation date.
+app.get("/api/admin/submissions", verifyAdminAccess, async function(req, res) {
+  try {
+    var result = await supabase
+      .from('syntrix_submissions')
+      .select('id, email, task_type, status, reason, storage_url, created_at')
       .order('created_at', { ascending: false })
       .limit(50);
-      
-    if (error) throw error;
-    res.json({ success: true, submissions: data });
+
+    if (result.error) {
+      throw new Error(result.error.message);
+    }
+
+    return res.json({
+      success: true,
+      submissions: result.data || []
+    });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[ADMIN SUBMISSIONS ERROR]', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch submissions: ' + err.message
+    });
   }
 });
 
-app.post("/api/admin/override", verifyAdminAccess, async (req, res) => {
-  const { id, newStatus, reason } = req.body;
+// -- POST /api/admin/override --
+// Force-updates a submission status and reason (God Mode approve/reject).
+app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
   try {
-    await supabase.from('syntrix_submissions').update({ status: newStatus, reason: reason }).eq('id', id);
-    res.json({ success: true });
+    var id = req.body.id;
+    var newStatus = req.body.newStatus;
+    var reason = req.body.reason || 'Manual override via God Mode';
+
+    if (!id || !newStatus) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: id and newStatus.'
+      });
+    }
+
+    // Validate that newStatus is an expected value
+    var allowedStatuses = ['verified', 'rejected', 'pending'];
+    if (allowedStatuses.indexOf(newStatus) === -1) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid status. Allowed: verified, rejected, pending.'
+      });
+    }
+
+    var result = await supabase
+      .from('syntrix_submissions')
+      .update({
+        status: newStatus,
+        reason: reason
+      })
+      .eq('id', id);
+
+    if (result.error) {
+      throw new Error(result.error.message);
+    }
+
+    console.log('[ADMIN OVERRIDE] Task ' + id + ' -> ' + newStatus);
+
+    return res.json({
+      success: true,
+      message: 'Submission ' + id + ' updated to ' + newStatus + '.'
+    });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[ADMIN OVERRIDE ERROR]', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Override failed: ' + err.message
+    });
   }
 });
 
