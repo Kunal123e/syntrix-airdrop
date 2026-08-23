@@ -13,16 +13,9 @@ const { awardXP, getXPProfile, calculateFinalTaskReward } = require("./xpengine"
 const app = express();
 
 // ================= CORS & HEADERS =================
-const allowedOrigins = [
-  "https://syntrix-frontend-servey-gea8-dfec9tz9j-krish-r-s-projects.vercel.app",
-  "https://syntrix-frontend-servey-gea8-e3jodvx67-krish-r-s-projects.vercel.app",
-  "http://localhost:3000",
-  "http://localhost:5000"
-];
-
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || origin.endsWith(".vercel.app") || origin === "http://localhost:3000") {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
