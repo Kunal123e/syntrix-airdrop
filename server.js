@@ -46,6 +46,15 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE
 );
 
+// ================= ASYNC UPLOAD QUEUE ROUTES (Phase 2 + Phase 3) =================
+app.locals.supabase = supabase;
+const uploadBatchRouter = require("./routes/uploadBatch");
+const checkBatchRouter = require("./routes/checkBatch");
+const processQueueRouter = require("./routes/processQueue");
+app.use("/api/uploads/batch", uploadBatchRouter);
+app.use("/api/uploads/batch", checkBatchRouter);
+app.use("/api/process-queue", processQueueRouter);
+
 // ================= POLYGON CONFIGURATION =================
 let provider;
 let wallet;
