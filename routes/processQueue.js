@@ -369,10 +369,10 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
 // =====================================================================
 // HELPER: Roll up batch status from its jobs
 // =====================================================================
-async function rollupBatchStatus(supabase, batchId) {
+async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
   var { data: jobs } = await supabase
     .from("upload_jobs")
-    .select("status")
+    .select("status, user_email")
     .eq("batch_id", batchId);
 
   if (!jobs || jobs.length === 0) return;
@@ -383,6 +383,7 @@ async function rollupBatchStatus(supabase, batchId) {
   var rejected = 0;
   var failed = 0;
   var stillPending = 0;
+  var userEmail = jobs[0].user_email;
 
   jobs.forEach(function(j) {
     if (j.status === "VERIFIED") { completed++; verified++; }
@@ -402,10 +403,39 @@ async function rollupBatchStatus(supabase, batchId) {
     batchStatus = "PARTIAL";
   }
 
+  // Check the current status BEFORE updating to avoid spamming emails
+  const { data: batchBeforeUpdate } = await supabase
+    .from("upload_batches")
+    .select("status")
+    .eq("id", batchId)
+    .single();
+
   await supabase
     .from("upload_batches")
     .update({ status: batchStatus, completed_jobs: completed })
     .eq("id", batchId);
+
+  // Trigger Email if batch JUST transitioned to a finished state
+  if (
+    stillPending === 0 && 
+    batchBeforeUpdate && 
+    batchBeforeUpdate.status !== "COMPLETED" && 
+    batchBeforeUpdate.status !== "PARTIAL" && 
+    batchBeforeUpdate.status !== "FAILED"
+  ) {
+    if (sendEmailHTTP && userEmail) {
+      const emailHtml = `
+        <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #000; color: #fff;">
+          <h2 style="color: #10b981;">Syntrix AI Batch Complete</h2>
+          <p style="color: #a1a1aa;">Your recent document upload batch has finished processing.</p>
+          <p style="margin-bottom: 30px;">Log in to your Dashboard and check the <strong>Upload History</strong> tab to see your results, review any rejected files, and claim your SYNX tokens!</p>
+          <a href="https://syntrix-frontend-servey-2hl7.vercel.app" style="background-color: #10b981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold;">Go to Dashboard</a>
+        </div>
+      `;
+      sendEmailHTTP(userEmail, "Syntrix AI Batch Processing Complete!", emailHtml)
+        .catch(e => console.error("Batch completion email failed:", e));
+    }
+  }
 }
 
 // =====================================================================
@@ -415,6 +445,7 @@ async function rollupBatchStatus(supabase, batchId) {
 router.post("/", async (req, res) => {
   try {
     var supabase = req.app.locals.supabase;
+    var sendEmailHTTP = req.app.locals.sendEmailHTTP;
     var adminKey = req.headers["x-admin-key"];
 
     // ---- Auth Check ----
@@ -529,7 +560,7 @@ router.post("/", async (req, res) => {
     // ---- 4. Roll up batch statuses for all affected batches ----
     var batchIds = Object.keys(affectedBatchIds);
     for (var b = 0; b < batchIds.length; b++) {
-      await rollupBatchStatus(supabase, batchIds[b]);
+      await rollupBatchStatus(supabase, batchIds[b], sendEmailHTTP);
     }
 
     return res.status(200).json({
