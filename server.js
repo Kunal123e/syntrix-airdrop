@@ -48,12 +48,32 @@ const supabase = createClient(
 
 // ================= ASYNC UPLOAD QUEUE ROUTES (Phase 2 + Phase 3) =================
 app.locals.supabase = supabase;
+app.locals.sendEmailHTTP = sendEmailHTTP;
 const uploadBatchRouter = require("./routes/uploadBatch");
 const checkBatchRouter = require("./routes/checkBatch");
 const processQueueRouter = require("./routes/processQueue");
 app.use("/api/uploads/batch", uploadBatchRouter);
 app.use("/api/uploads/batch", checkBatchRouter);
 app.use("/api/process-queue", processQueueRouter);
+
+// GET /api/user-history
+app.get("/api/user-history", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ success: false, error: "Email is required" });
+    const { data, error } = await supabase
+      .from("upload_jobs")
+      .select("file_name, storage_url, status, reason, reward_amount, created_at")
+      .eq("user_email", email.toLowerCase().trim())
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (error) throw error;
+    res.json({ success: true, history: data });
+  } catch (err) {
+    console.error("History fetch error:", err);
+    res.status(500).json({ success: false, error: "Failed to fetch history" });
+  }
+});
 
 // ================= POLYGON CONFIGURATION =================
 let provider;
