@@ -1,5 +1,4 @@
-// ---- Input Validation ----
-  if (!userEmail || !files || !Array.isArray(files) || files.length === 0) {
+if (!userEmail || !files || !Array.isArray(files) || files.length === 0) {
     return res.status(400).json({
       success: false,
       error: "Missing required fields: userEmail (string), files (array of {taskType, fileName, imageBase64})"
@@ -17,7 +16,6 @@
   const jobResults = [];
   const validJobs = [];
   
-  // ---- Process Each File ----
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const { taskType, fileName, imageBase64, contentTags } = file;
@@ -33,7 +31,6 @@
       continue;
     }
   
-    // ---- Decode Base64 to Buffer ----
     let buffer;
     try {
       const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
@@ -60,10 +57,8 @@
       continue;
     }
   
-    // ---- SHA-256 Hash ----
     const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
   
-    // ---- Duplicate Detection: Check upload_jobs for existing hash ----
     const { data: existingHash, error: hashCheckErr } = await supabase
       .from("upload_jobs")
       .select("id, status, user_email")
@@ -82,7 +77,6 @@
       continue;
     }
   
-    // ---- Also check the legacy syntrix_submissions table ----
     const { data: legacyDup, error: legacyErr } = await supabase
       .from("syntrix_submissions")
       .select("id")
@@ -100,7 +94,6 @@
       continue;
     }
   
-    // ---- Upload to Supabase Storage ----
     const safeFileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, "_");
     const storagePath = `queue/${sanitizedEmail}/${Date.now()}_${i}_${safeFileName}`;
   
@@ -122,14 +115,12 @@
       continue;
     }
   
-    // ---- Get Public URL ----
     const { data: publicUrlData } = supabase.storage
       .from("verified_assets")
       .getPublicUrl(storagePath);
   
     const storageUrl = publicUrlData ? publicUrlData.publicUrl : null;
   
-    // ---- Queue this job ----
     validJobs.push({
       user_email: sanitizedEmail,
       task_type: taskType,
@@ -142,9 +133,8 @@
     });
   }
   
-  // ---- If no valid jobs, return early ----
   if (validJobs.length === 0) {
-    const uniqueReasons = [...new Set(jobResults.map(j => j.reason))];
+    const uniqueReasons = [...new Set(jobResults.map(function(j) { return j.reason; }))];
     const reasonsStr = uniqueReasons.join(" | ");
     return res.status(200).json({
       success: true,
@@ -155,7 +145,6 @@
     });
   }
   
-  // ---- Create Batch Row ----
   const { data: batchData, error: batchErr } = await supabase
     .from("upload_batches")
     .insert([{
@@ -177,7 +166,6 @@
   
   const batchId = batchData.id;
   
-  // ---- Create Job Rows ----
   const jobInserts = validJobs.map(function(job) {
     return {
       batch_id: batchId,
@@ -198,7 +186,6 @@
   
   if (jobInsertErr) {
     console.error("[BATCH] Failed to create job rows:", jobInsertErr);
-    // Roll back the batch
     await supabase.from("upload_batches").delete().eq("id", batchId);
     return res.status(500).json({
       success: false,
@@ -206,7 +193,6 @@
     });
   }
   
-  // ---- Merge results: rejected files + queued files ----
   const finalJobs = [
     ...jobResults,
     ...insertedJobs.map(function(j, idx) {
@@ -219,7 +205,6 @@
     })
   ].sort(function(a, b) { return a.index - b.index; });
   
-  // ---- FAST RETURN — No AI processing happens here ----
   return res.status(200).json({
     success: true,
     batchId: batchId,
