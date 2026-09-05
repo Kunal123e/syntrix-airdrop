@@ -137,11 +137,24 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var relativeFilePath = getBucketPathFromUrl(job.storage_url);
   var isSelfie = job.task_type === "selfie";
 
-  // ---- Mark job as PROCESSING ----
-  await supabase
+  // ---- ATOMIC CLAIMING (PHASE 2) ----
+  // Optimistically lock the job so multiple workers don't process it twice
+  var { data: claimData, error: claimErr } = await supabase
     .from("upload_jobs")
     .update({ status: "PROCESSING", assigned_key: keyName })
-    .eq("id", job.id);
+    .eq("id", job.id)
+    .in("status", ["QUEUED", "RETRYING"]) // Only claim if it hasn't been picked up
+    .select("id");
+
+  if (claimErr) {
+    throw new Error("Failed to claim job: " + claimErr.message);
+  }
+  
+  if (!claimData || claimData.length === 0) {
+    // Another worker already claimed this job, or it's no longer QUEUED
+    console.warn("[QUEUE] Job " + job.id + " already claimed by another worker. Skipping.");
+    return { jobId: job.id, result: "SKIPPED", reason: "Atomic lock failed (Already claimed)" };
+  }
 
   // ---- 1. Fetch image from storage ----
   var imageResponse = await fetch(job.storage_url);
@@ -477,13 +490,34 @@ router.post("/", async (req, res) => {
       });
     }
 
-    // ---- 2. Fetch queued jobs using fair round-robin ----
-    var { data: jobs, error: fetchErr } = await supabase
-      .rpc("get_fair_queued_jobs", { job_limit: 5 });
+    // ---- 2. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
+    var jobs = [];
+    var { data: rpcJobs, error: fetchErr } = await supabase.rpc("get_fair_queued_jobs", { job_limit: 5 });
 
-    if (fetchErr) {
-      console.error("[QUEUE] Failed to fetch jobs:", fetchErr.message);
-      return res.status(500).json({ success: false, error: "Failed to fetch queued jobs." });
+    if (!fetchErr && rpcJobs && rpcJobs.length > 0) {
+        jobs = rpcJobs;
+    } else {
+        if (fetchErr) console.warn("[QUEUE] RPC get_fair_queued_jobs failed/missing. Using fallback queries...");
+        
+        // Fallback: Fetch max 3 Documents and max 2 Selfies to separate workloads
+        var { data: docJobs } = await supabase
+            .from("upload_jobs")
+            .select("*")
+            .in("status", ["QUEUED", "RETRYING"])
+            .neq("task_type", "selfie")
+            .order("created_at", { ascending: true })
+            .limit(3);
+            
+        var { data: selfieJobs } = await supabase
+            .from("upload_jobs")
+            .select("*")
+            .in("status", ["QUEUED", "RETRYING"])
+            .eq("task_type", "selfie")
+            .order("created_at", { ascending: true })
+            .limit(2);
+            
+        if (docJobs) jobs = jobs.concat(docJobs);
+        if (selfieJobs) jobs = jobs.concat(selfieJobs);
     }
 
     if (!jobs || jobs.length === 0) {
@@ -533,26 +567,36 @@ router.post("/", async (req, res) => {
 
           shouldStop = true; // Stop processing remaining jobs
         } else {
-          // ---- General error: fail the job ----
+          // ---- General error: Catch silently and retry (Phase 2) ----
           console.error("[QUEUE] Job " + job.id + " failed:", jobErr.message);
 
           var filePath = getBucketPathFromUrl(job.storage_url);
-          if (filePath) {
-            await supabase.storage.from("verified_assets").remove([filePath]).catch(function() {});
+          var isFatal = jobErr.isKeyError || false; // Don't retry if we literally don't have a key mapped
+          
+          var newRetryCount = (job.retry_count || 0) + 1;
+          var maxRetries = job.max_retries || 3;
+          
+          if (newRetryCount >= maxRetries || isFatal) {
+              // Final failure
+              if (filePath) await supabase.storage.from("verified_assets").remove([filePath]).catch(function() {});
+              await supabase.from("upload_jobs").update({
+                status: "FAILED",
+                error_code: "PROCESSING_ERROR",
+                reason: "System Error: " + (jobErr.message || "Unknown error"),
+                processed_at: new Date().toISOString(),
+                retry_count: newRetryCount
+              }).eq("id", job.id);
+              results.push({ jobId: job.id, result: "FAILED", reason: jobErr.message });
+          } else {
+              // Safe retry
+              await supabase.from("upload_jobs").update({
+                status: "RETRYING",
+                error_code: "RETRY",
+                reason: "Temporary error: " + (jobErr.message || "Unknown"),
+                retry_count: newRetryCount
+              }).eq("id", job.id);
+              results.push({ jobId: job.id, result: "RETRYING", reason: jobErr.message });
           }
-
-          await supabase.from("upload_jobs").update({
-            status: "FAILED",
-            error_code: "PROCESSING_ERROR",
-            reason: "System Error: " + (jobErr.message || "Unknown error"),
-            processed_at: new Date().toISOString()
-          }).eq("id", job.id);
-
-          results.push({
-            jobId: job.id,
-            result: "FAILED",
-            reason: jobErr.message
-          });
         }
       }
     }
