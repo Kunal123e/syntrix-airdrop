@@ -154,13 +154,13 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
 
   // ---- 2. AI Verification ----
   var qualityRules = isSelfie
-    ? "Is it a clear, authentic photograph of a real human face? Provide a specific reason if it fails."
-    : "Is this an authentic photo of physical, handwritten notes containing: " + (job.content_tags ? job.content_tags.join(", ") : "academic content") + "? Reject PDFs, screenshots, printed textbook text, blank pages, and ABSOLUTELY REJECT any human faces, selfies, or passport-style portrait photos.";
+    ? "Is it a clear, authentic photograph of a real human face taken by a camera? You MUST reject AI-generated faces, cartoons, drawings, photos of photos, and screen captures. Provide a specific reason if it fails."
+    : "You are a STRINGENT data quality gatekeeper. You MUST reject this image if ANY of the following are true: (a) It is a screenshot or screen capture of any device. (b) It contains digital/typed/printed text from a computer, phone, or textbook. (c) It is a photo of a textbook, printed book page, or PDF document. (d) It is a random photo of an object, animal, scenery, or food that is NOT a document. (e) It is a blank or nearly blank page. (f) It contains human faces, selfies, or portrait photos. You may ONLY approve images that are authentic photographs of PHYSICAL, HANDWRITTEN notes written on real paper containing: " + (job.content_tags ? job.content_tags.join(", ") : "academic content") + ". The handwriting must be clearly visible and the content must be educational or informational. If rejecting, state the exact reason like 'Screenshot detected', 'Printed/digital text - not handwritten', 'Random photo - not a document', or 'Textbook page - not handwritten notes'.";
 
-  var combinedPrompt = "You are a strict security AI validator. Evaluate this image for:\n" +
+  var combinedPrompt = "You are an extremely strict security AI validator for a data quality platform. Your job is to PROTECT the dataset from low-quality or fraudulent submissions. When in doubt, REJECT. Evaluate this image for:\n" +
     "1. QUALITY: " + qualityRules + "\n" +
-    "2. PII: Does this image contain Sensitive Personal Identifiable Information (phone numbers, addresses)?\n" +
-    'Respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Short reason"}';
+    "2. PII: Does this image contain Sensitive Personal Identifiable Information (phone numbers, home addresses, government IDs like Aadhaar/SSN, bank account numbers, or passwords)?\n" +
+    'You MUST respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Concise specific reason for your decision"}';
 
   var response;
   try {
