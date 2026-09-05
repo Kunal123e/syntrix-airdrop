@@ -56,17 +56,18 @@ app.use("/api/uploads/batch", uploadBatchRouter);
 app.use("/api/uploads/batch", checkBatchRouter);
 app.use("/api/process-queue", processQueueRouter);
 
-// GET /api/user-history
-app.get("/api/user-history", async (req, res) => {
+// GET /api/history
+app.get('/api/history', async (req, res) => {
   try {
     const { email } = req.query;
     if (!email) return res.status(400).json({ success: false, error: "Email is required" });
+    
     const { data, error } = await supabase
       .from("upload_jobs")
-      .select("file_name, storage_url, status, reason, reward_amount, created_at")
+      .select("id, file_name, status, reason, reward_amount, storage_url, created_at")
       .eq("user_email", email.toLowerCase().trim())
-      .order("created_at", { ascending: false })
-      .limit(50);
+      .order("created_at", { ascending: false });
+      
     if (error) throw error;
     res.json({ success: true, history: data });
   } catch (err) {
