@@ -725,8 +725,8 @@ app.post("/api/upload-task", async (req, res) => {
     if (dbError) throw dbError;
 
     res.json({ success: true, message: "Queued for AI Verification" });
-    processTaskQueueEngine();
-
+    // Legacy queue engine call removed to prevent ReferenceError crash.
+    
   } catch (err) {
     return res.status(500).json({ error: "Ingestion failed: " + err.message });
   }
@@ -735,7 +735,61 @@ app.post("/api/upload-task", async (req, res) => {
 // =========================================================================
 // RENDER SLEEP STARTUP RECOVERY & NEW WORKER ENGINE (PHASE 2)
 // =========================================================================
-(async function startupRecovery() { console.log('[SYSTEM] Running startup recovery hook...'); try { const { data, error } = await supabase.from('upload_jobs').update({ status: 'QUEUED', reason: 'Recovered from stale server sleep/crash' }).eq('status', 'PROCESSING'); if (error) console.error('[SYSTEM] Recovery error:', error.message); else console.log('[SYSTEM] Cleared stale PROCESSING jobs.'); } catch (e) { console.error('[SYSTEM] Startup recovery exception:', e.message); } })(); let isWorkerActive = false; setInterval(async () => { if (isWorkerActive) return; isWorkerActive = true; try { const adminKey = process.env.ADMIN_SECRET_KEY; if (!adminKey) return; const PORT = process.env.PORT || 5000; const res = await fetch(http://127.0.0.1:/api/process-queue, { method: 'POST', headers: { 'x-admin-key': adminKey } }); const data = await res.json(); if (data.processed > 0) { console.log([QUEUE] Processed  jobs successfully.); } } catch (e) { } finally { isWorkerActive = false; } }, 5000); app.post('/api/admin/queue/wake', async (req, res) => { const adminKey = req.headers['x-admin-key']; if (!process.env.ADMIN_SECRET_KEY || adminKey !== process.env.ADMIN_SECRET_KEY) { return res.status(403).json({ success: false, error: 'Unauthorized' }); } const PORT = process.env.PORT || 5000; fetch(http://127.0.0.1:/api/process-queue, { method: 'POST', headers: { 'x-admin-key': adminKey } }).catch(()=>{}); res.json({ success: true, message: 'Worker awakened and queue triggered.' }); });
+(async function startupRecovery() {
+    console.log("[SYSTEM] Running startup recovery hook...");
+    try {
+        const { data, error } = await supabase
+            .from("upload_jobs")
+            .update({ status: "QUEUED", reason: "Recovered from stale server sleep/crash" })
+            .eq("status", "PROCESSING");
+        if (error) console.error("[SYSTEM] Recovery error:", error.message);
+        else console.log("[SYSTEM] Cleared stale PROCESSING jobs.");
+    } catch (e) {
+        console.error("[SYSTEM] Startup recovery exception:", e.message);
+    }
+})();
+
+let isWorkerActive = false;
+setInterval(async () => {
+    if (isWorkerActive) return;
+    isWorkerActive = true;
+    try {
+        const adminKey = process.env.ADMIN_SECRET_KEY;
+        if (!adminKey) return;
+        const PORT = process.env.PORT || 5000;
+        
+        const fetchUrl = "http://127.0.0.1:" + PORT + "/api/process-queue";
+        const res = await fetch(fetchUrl, {
+            method: "POST",
+            headers: { "x-admin-key": adminKey }
+        });
+        
+        const data = await res.json();
+        if (data && data.processed > 0) {
+            console.log("[QUEUE] Processed " + data.processed + " jobs successfully.");
+        }
+    } catch (e) {
+        // Silent catch
+    } finally {
+        isWorkerActive = false;
+    }
+}, 5000);
+
+app.post("/api/admin/queue/wake", async (req, res) => {
+    const adminKey = req.headers["x-admin-key"];
+    if (!process.env.ADMIN_SECRET_KEY || adminKey !== process.env.ADMIN_SECRET_KEY) {
+        return res.status(403).json({ success: false, error: "Unauthorized" });
+    }
+    const PORT = process.env.PORT || 5000;
+    const fetchUrl = "http://127.0.0.1:" + PORT + "/api/process-queue";
+    
+    fetch(fetchUrl, {
+        method: "POST",
+        headers: { "x-admin-key": adminKey }
+    }).catch(function(e){});
+    
+    res.json({ success: true, message: "Worker awakened and queue triggered." });
+});
 
 // ================= XP PROFILE =================
 app.get("/api/xp-profile", async (req, res) => {
