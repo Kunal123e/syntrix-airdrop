@@ -77,7 +77,9 @@ async function incrementKeyCallCount(supabase, keyName) {
 function resolveKeyValue(keyName) {
   var mapping = {
     "GEMINI_DOCUMENT_KEY_1": process.env.GEMINI_DOCUMENT_KEY_1 || process.env.GEMINI_API_KEY_DOCS || process.env.GEMINI_API_KEY,
-    "GEMINI_DOCUMENT_KEY_2": process.env.GEMINI_DOCUMENT_KEY_2 || process.env.GEMINI_BACKUP_KEY || process.env.GEMINI_API_KEY
+    "GEMINI_DOCUMENT_KEY_2": process.env.GEMINI_DOCUMENT_KEY_2 || process.env.GEMINI_BACKUP_KEY || process.env.GEMINI_API_KEY,
+    "GEMINI_SELFIE_KEY_1": process.env.GEMINI_API_SELFIE || process.env.GEMINI_API_KEY,
+    "GEMINI_SELFIE_KEY_2": process.env.GEMINI_API_SELFIE || process.env.GEMINI_API_KEY
   };
   return mapping[keyName] || process.env.GEMINI_API_KEY;
 }
@@ -147,7 +149,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var response;
   try {
     response = await aiClient.models.generateContent({
-      model: "gemini-3.6-flash",
+      model: "gemini-1.5-flash",
       contents: [
         { text: combinedPrompt },
         { inlineData: { mimeType: "image/jpeg", data: base64Data } }
