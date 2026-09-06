@@ -37,7 +37,7 @@ async function getAvailableKey(supabase) {
       if (now >= cooldownEnd) {
         await supabase
           .from("gemini_key_status")
-          .update({ is_on_cooldown: false, cooldown_until: null })
+          .update({ is_on_cooldown: false })
           .eq("key_name", key.key_name);
         key.is_on_cooldown = false;
       }
@@ -500,18 +500,22 @@ router.post("/", async (req, res) => {
         if (fetchErr) console.warn("[QUEUE] RPC get_fair_queued_jobs failed/missing. Using fallback queries...");
         
         // Fallback: Fetch max 3 Documents and max 2 Selfies to separate workloads
+        var columns = "id, status, user_email, task_type, storage_url, file_name, file_hash, retry_count, max_retries, batch_id, content_tags";
+        
         var { data: docJobs } = await supabase
             .from("upload_jobs")
-            .select("*")
+            .select(columns)
             .in("status", ["QUEUED", "RETRYING"])
+            .is("assigned_key", null)
             .neq("task_type", "selfie")
             .order("created_at", { ascending: true })
             .limit(3);
             
         var { data: selfieJobs } = await supabase
             .from("upload_jobs")
-            .select("*")
+            .select(columns)
             .in("status", ["QUEUED", "RETRYING"])
+            .is("assigned_key", null)
             .eq("task_type", "selfie")
             .order("created_at", { ascending: true })
             .limit(2);
