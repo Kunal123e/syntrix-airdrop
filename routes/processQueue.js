@@ -1,15 +1,30 @@
+// =====================================================================
+// POST /api/process-queue — Serverless Queue Processor (Phase 3)
+// 
+// Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
+// processes them through Gemini AI with key pooling & rate limit handling,
+// awards SYNX tokens idempotently, and rolls up batch statuses.
+//
+// Trigger via: Vercel Cron, Supabase Webhook, external scheduler,
+// or setInterval in server.js.
+// Secured with x-admin-key header.
+// =====================================================================
+
 const express = require("express");
 const crypto = require("crypto");
 const { GoogleGenAI } = require("@google/genai");
 const router = express.Router();
 
 // =====================================================================
-// HELPER: Get the next available API key that isn't rate-limited
+// HELPER: Get a non-cooldown Gemini API key from the DB
+// Filters by task type so selfie keys never bleed into document jobs.
 // =====================================================================
-async function getAvailableKey(supabase) {
+async function getAvailableKey(supabase, taskType) {
+  var keyPrefix = taskType === "selfie" ? "GEMINI_SELFIE_KEY_%" : "GEMINI_DOCUMENT_KEY_%";
   const { data: keys, error } = await supabase
     .from("gemini_key_status")
     .select("*")
+    .like("key_name", keyPrefix)
     .order("total_calls", { ascending: true }); // prefer least-used key
 
   if (error || !keys || keys.length === 0) return null;
@@ -40,24 +55,43 @@ async function getAvailableKey(supabase) {
 }
 
 // =====================================================================
-// HELPER: Mark a key as rate-limited (60 min cooldown)
+// HELPER: Mark a key as on cooldown (2 minute window)
 // =====================================================================
 async function markKeyCooldown(supabase, keyName) {
-  const cooldownUntil = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+  const cooldownUntil = new Date(Date.now() + 2 * 60 * 1000).toISOString(); // 2 minutes
   await supabase
     .from("gemini_key_status")
     .update({
       is_on_cooldown: true,
-      cooldown_until: cooldownUntil
+      cooldown_until: cooldownUntil,
+      total_errors: supabase.rpc ? undefined : 0 // increment handled below
     })
     .eq("key_name", keyName);
+
+  // Increment error count
+  await supabase.rpc("increment_key_errors", { target_key: keyName }).catch(function() {
+    // If RPC doesn't exist, do manual increment
+    supabase
+      .from("gemini_key_status")
+      .select("total_errors")
+      .eq("key_name", keyName)
+      .single()
+      .then(function(res) {
+        if (res.data) {
+          supabase
+            .from("gemini_key_status")
+            .update({ total_errors: (res.data.total_errors || 0) + 1 })
+            .eq("key_name", keyName);
+        }
+      });
+  });
 }
 
 // =====================================================================
 // HELPER: Increment key call count
 // =====================================================================
 async function incrementKeyCallCount(supabase, keyName) {
-  const { data } = await supabase
+  var { data } = await supabase
     .from("gemini_key_status")
     .select("total_calls")
     .eq("key_name", keyName)
@@ -96,7 +130,7 @@ function getBucketPathFromUrl(url) {
 }
 
 // =====================================================================
-// CORE LOGIC: Process a single upload job
+// HELPER: Process a single upload_job through the AI pipeline
 // =====================================================================
 async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var apiKeyValue = resolveKeyValue(keyName);
@@ -450,18 +484,7 @@ router.post("/", async (req, res) => {
       console.warn("[QUEUE] xpengine.js not found — rewards will use base 48 SYNX without multipliers.");
     }
 
-    // ---- 1. Get available Gemini API key ----
-    var keyName = await getAvailableKey(supabase);
-    if (!keyName) {
-      return res.status(200).json({
-        success: true,
-        status: "ALL_KEYS_COOLING",
-        message: "All Gemini API keys are on cooldown. Retry after cooldown expires.",
-        processed: 0
-      });
-    }
-
-    // ---- 2. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
+    // ---- 1. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
     var jobs = [];
     var { data: rpcJobs, error: fetchErr } = await supabase.rpc("get_fair_queued_jobs", { job_limit: 5 });
 
@@ -514,6 +537,14 @@ router.post("/", async (req, res) => {
 
       var job = jobs[i];
       affectedBatchIds[job.batch_id] = true;
+
+      // Assign job-specific key (selfie keys for selfies, document keys for documents)
+      var keyName = await getAvailableKey(supabase, job.task_type);
+      if (!keyName) {
+        console.warn("[QUEUE] No keys available for task type: " + job.task_type + ". Skipping job " + job.id);
+        results.push({ jobId: job.id, result: "SKIPPED", reason: "All keys on cooldown for this task type." });
+        continue; // Keep it in QUEUED state
+      }
 
       try {
         var result = await processUploadJob(supabase, job, keyName, xpFunctions);
@@ -585,7 +616,7 @@ router.post("/", async (req, res) => {
     return res.status(200).json({
       success: true,
       status: "PROCESSED",
-      keyUsed: keyName,
+      keyUsed: "multi-key",
       processed: results.length,
       results: results
     });
