@@ -189,18 +189,31 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
+const otpCooldowns = new Map();
+
 // ================= OTP ROUTES =================
 app.post("/api/send-otp", async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: "Email required." });
 
   const sanitizedEmail = email.trim().toLowerCase();
+
+  // Rate Limiting: 60-second cooldown per email
+  if (otpCooldowns.has(sanitizedEmail)) {
+    const lastSent = otpCooldowns.get(sanitizedEmail);
+    if (Date.now() - lastSent < 60000) {
+      return res.status(429).json({ error: "Please wait 60 seconds before requesting another code." });
+    }
+  }
+
   const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
 
   otpStorage[sanitizedEmail] = {
     otp: otpCode,
     expires: Date.now() + 10 * 60 * 1000
   };
+
+  otpCooldowns.set(sanitizedEmail, Date.now());
 
   const htmlBody = `
     <div style="font-family: Arial, sans-serif; padding: 25px; border: 1px solid #e2e8f0; border-radius: 12px; max-width: 500px;">
