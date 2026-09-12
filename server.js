@@ -298,7 +298,7 @@ app.get("/r/:refCode", (req, res) => {
 // ================= SURVEY INGESTION SYSTEM =================
 app.post("/api/submit-survey", async (req, res) => {
   try {
-    const { email, referredBy, answers, startTime, submissionTime, assignedBadge } = req.body;
+    const { email, referredBy, survey_data, startTime, submissionTime, persona_badge } = req.body;
 
     if (!startTime || !submissionTime) {
       return res.status(400).json({ error: "Missing required timing metrics." });
@@ -364,9 +364,9 @@ app.post("/api/submit-survey", async (req, res) => {
         amount_rewarded: surveyRewardInfo.finalReward,
         status: "pending",
         referral_code: generatedReferralCode,
-        survey_data: answers,
+        survey_data: survey_data,
         survey_duration_seconds: Math.floor(timeTaken / 1000),
-        assigned_badge: assignedBadge || "Analyzer"
+        persona_badge: persona_badge || "Analyzer"
       }]);
 
     if (claimError) return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
