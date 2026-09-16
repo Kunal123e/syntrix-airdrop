@@ -15,7 +15,8 @@ const app = express();
 // ================= CORS & HEADERS =================
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || origin.endsWith(".vercel.app") || origin === "http://localhost:3000") {
+    // Allow all Vercel subdomains, localhost, and empty origins (like Postman)
+    if (!origin || origin.includes("vercel.app") || origin.includes("localhost") || origin.includes("127.0.0.1")) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
@@ -23,7 +24,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key", "Origin", "X-Requested-With", "x-admin-key"]
+  allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key", "Origin", "X-Requested-With", "x-admin-key", "Access-Control-Allow-Origin"]
 }));
 
 // STRICT RULE APPLIED: Limit boosted to 50mb to completely prevent WAF drops
