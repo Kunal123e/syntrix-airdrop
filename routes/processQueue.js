@@ -17,7 +17,6 @@ const router = express.Router();
 
 // =====================================================================
 // HELPER: Get a non-cooldown Gemini API key from the DB
-// Filters by task type so selfie keys never bleed into document jobs.
 // =====================================================================
 async function getAvailableKey(supabase, taskType) {
   var keyPrefix = taskType === "selfie" ? "GEMINI_SELFIE_KEY_%" : "GEMINI_DOCUMENT_KEY_%";
@@ -170,15 +169,61 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var imageBuffer = Buffer.from(arrayBuffer);
   var base64Data = imageBuffer.toString("base64");
 
+  // ---- 1.5 Zero-Trust EXIF Pre-Check (Documents Only) ----
+  if (!isSelfie) {
+    // JPEG EXIF check: Look for EXIF marker (0xFFE1) in JPEG header
+    // Real camera photos contain EXIF metadata; pure screenshots/digital files typically don't
+    var hasExifMarker = false;
+    if (imageBuffer.length > 4 && imageBuffer[0] === 0xFF && imageBuffer[1] === 0xD8) {
+      // Valid JPEG start - scan for APP1 (EXIF) marker
+      for (var ei = 2; ei < Math.min(imageBuffer.length - 1, 65536); ei++) {
+        if (imageBuffer[ei] === 0xFF && imageBuffer[ei + 1] === 0xE1) {
+          hasExifMarker = true;
+          break;
+        }
+        // Skip past other markers
+        if (imageBuffer[ei] === 0xFF && imageBuffer[ei + 1] !== 0x00) {
+          if (ei + 3 < imageBuffer.length) {
+            var markerLen = (imageBuffer[ei + 2] << 8) | imageBuffer[ei + 3];
+            ei += markerLen + 1;
+          }
+        }
+      }
+    }
+    
+    if (!hasExifMarker) {
+      // No EXIF data found — likely a screenshot or digitally created image
+      if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
+      await supabase.from("upload_jobs").update({
+        status: "REJECTED",
+        error_code: "NO_EXIF_DATA",
+        reason: "Digital screenshots rejected. Real-world camera noise required.",
+        processed_at: new Date().toISOString()
+      }).eq("id", job.id);
+      return { jobId: job.id, result: "REJECTED", reason: "Digital screenshots rejected. Real-world camera noise required." };
+    }
+  }
+
   // ---- 2. AI Verification ----
   var qualityRules = isSelfie
     ? "Is it a clear, authentic photograph of a real human face taken by a camera? You MUST reject AI-generated faces, cartoons, drawings, photos of photos, and screen captures. Provide a specific reason if it fails."
     : "You are a STRINGENT data quality gatekeeper. You MUST reject this image if ANY of the following are true: (a) It is a screenshot or screen capture of any device. (b) It contains digital/typed/printed text from a computer, phone, or textbook. (c) It is a photo of a textbook, printed book page, or PDF document. (d) It is a random photo of an object, animal, scenery, or food that is NOT a document. (e) It is a blank or nearly blank page. (f) It contains human faces, selfies, or portrait photos. You may ONLY approve images that are authentic photographs of PHYSICAL, HANDWRITTEN notes written on real paper containing: " + (job.content_tags ? job.content_tags.join(", ") : "academic content") + ". The handwriting must be clearly visible and the content must be educational or informational. If rejecting, state the exact reason like 'Screenshot detected', 'Printed/digital text - not handwritten', 'Random photo - not a document', or 'Textbook page - not handwritten notes'.";
 
-  var combinedPrompt = "You are an extremely strict security AI validator for a data quality platform. Your job is to PROTECT the dataset from low-quality or fraudulent submissions. When in doubt, REJECT. Evaluate this image for:\n" +
-    "1. QUALITY: " + qualityRules + "\n" +
-    "2. PII: Does this image contain Sensitive Personal Identifiable Information (phone numbers, home addresses, government IDs like Aadhaar/SSN, bank account numbers, or passwords)?\n" +
-    'You MUST respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Concise specific reason for your decision"}';
+  var combinedPrompt;
+  if (isSelfie) {
+    combinedPrompt = "You are an extremely strict security AI validator for a data quality platform. Your job is to PROTECT the dataset from low-quality or fraudulent submissions. When in doubt, REJECT. Evaluate this image for:\n" +
+      "1. QUALITY: " + qualityRules + "\n" +
+      "2. PII: Does this image contain Sensitive Personal Identifiable Information (phone numbers, home addresses, government IDs like Aadhaar/SSN, bank account numbers, or passwords)?\n" +
+      'You MUST respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Concise specific reason for your decision"}';
+  } else {
+    combinedPrompt = "Evaluate this document and return a JSON object with 'quality_pass', 'category_tier', 'quality_score', and 'contains_pii'. " +
+      "If 'contains_pii' is true (SSN, credit cards, sensitive IDs, Aadhaar numbers, bank account numbers, passwords), immediately flag for purging: set quality_pass to false and yield quality_score 0. " +
+      "If false, calculate 'quality_score' (0-100) strictly based on: 40% Information Density (extractable entities/tables), 30% Visual Integrity (OCR confidence, lighting, no glare), 20% Structural Complexity (handwritten margins, mixed layouts), 10% Rarity (unique localized formats). " +
+      "Classify 'category_tier' as 1 (High Value: Invoices, Contracts, Medical Records), 2 (Mid Value: Receipts, Handwritten Notes, Academic), or 3 (Low Value: Menus, Flyers, Generic Prints). " +
+      "ADDITIONAL REJECTION RULES: " + qualityRules + " " +
+      "If the image fails quality rules, set quality_pass to false and quality_score to 0. " +
+      'You MUST respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "category_tier": 1_or_2_or_3, "quality_score": 0_to_100, "reason": "Concise specific reason for your decision"}';
+  }
 
   var response;
   try {
@@ -307,19 +352,49 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   }
   var { data: finalUrlData } = supabase.storage.from("verified_assets").getPublicUrl(verifiedPath);
 
-  // ---- 7. Calculate reward ----
-  var rewardAmount = 48; // base
+  // ---- 7. Calculate reward (Tier Multiplier Matrix) ----
+  var rewardAmount = 0;
+
+  if (isSelfie) {
+    // Selfies use flat base reward
+    rewardAmount = 48;
+  } else {
+    // Documents use the Category Tier x Quality Score matrix
+    var maxSynx = 0;
+    var categoryTier = aiVerdict.category_tier || 3;
+    if (categoryTier === 1) maxSynx = 100;
+    else if (categoryTier === 2) maxSynx = 50;
+    else if (categoryTier === 3) maxSynx = 20;
+
+    var qualityScore = aiVerdict.quality_score || 0;
+    if (qualityScore >= 90) rewardAmount = maxSynx;
+    else if (qualityScore >= 80) rewardAmount = Math.floor(maxSynx * 0.8);
+    else if (qualityScore >= 70) rewardAmount = Math.floor(maxSynx * 0.5);
+    else {
+      // Sub-70 data is rejected to protect commercial packages
+      if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
+      await supabase.from("upload_jobs").update({
+        status: "REJECTED",
+        error_code: "LOW_QUALITY_SCORE",
+        reason: "Quality score " + qualityScore + "/100 below minimum threshold (70). Category Tier " + categoryTier + ".",
+        processed_at: new Date().toISOString()
+      }).eq("id", job.id);
+      return { jobId: job.id, result: "REJECTED", reason: "Quality score " + qualityScore + "/100 below threshold" };
+    }
+  }
+
+  // Apply XP multiplier on top of the tier-based reward
   if (xpFunctions && xpFunctions.getXPProfile && xpFunctions.calculateFinalTaskReward) {
     try {
       var xpProfile = await xpFunctions.getXPProfile(supabase, job.user_email);
       var rewardInfo = xpFunctions.calculateFinalTaskReward(
-        48,
+        rewardAmount,
         xpProfile ? xpProfile.currentLevel : 1,
         xpProfile ? xpProfile.dailyStreak : 0
       );
       rewardAmount = rewardInfo.finalReward;
     } catch (xpErr) {
-      console.warn("[QUEUE] XP profile lookup failed, using base 48:", xpErr.message);
+      console.warn("[QUEUE] XP profile lookup failed, using tier-based reward " + rewardAmount + ":", xpErr.message);
     }
   }
 
@@ -538,7 +613,7 @@ router.post("/", async (req, res) => {
       var job = jobs[i];
       affectedBatchIds[job.batch_id] = true;
 
-      // Assign job-specific key (selfie keys for selfies, document keys for documents)
+      // Assign job-specific key
       var keyName = await getAvailableKey(supabase, job.task_type);
       if (!keyName) {
         console.warn("[QUEUE] No keys available for task type: " + job.task_type + ". Skipping job " + job.id);
