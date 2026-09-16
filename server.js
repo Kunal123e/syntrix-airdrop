@@ -196,6 +196,11 @@ app.post("/api/send-otp", async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: "Email required." });
 
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: "Invalid email format." });
+  }
+
   const sanitizedEmail = email.trim().toLowerCase();
 
   // Rate Limiting: 60-second cooldown per email
@@ -298,7 +303,7 @@ app.get("/r/:refCode", (req, res) => {
 // ================= SURVEY INGESTION SYSTEM =================
 app.post("/api/submit-survey", async (req, res) => {
   try {
-    const { email, referredBy, survey_data, startTime, submissionTime, persona_badge } = req.body;
+    const { email, referredBy, survey_data, startTime, submissionTime, persona_badge, duration_seconds, selfie_verified, selfie_consent, selfie_asset_url } = req.body;
 
     if (!startTime || !submissionTime) {
       return res.status(400).json({ error: "Missing required timing metrics." });
@@ -310,9 +315,6 @@ app.post("/api/submit-survey", async (req, res) => {
     }
 
     const timeTaken = submissionTime - startTime;
-    if (timeTaken < 120000) {
-      return res.status(400).json({ error: "Survey completed too quickly. Please take adequate time." });
-    }
 
     if (!email) return res.status(400).json({ error: "Email identifier required" });
     const sanitizedEmail = email.trim().toLowerCase();
@@ -325,6 +327,34 @@ app.post("/api/submit-survey", async (req, res) => {
       .maybeSingle();
 
     if (existingEmail) return res.status(400).json({ error: "This email has already submitted the survey." });
+
+    // ---- SPEED TRAP: 8 questions must take > 40 seconds minimum ----
+    const actualDuration = duration_seconds || Math.floor(timeTaken / 1000);
+    if (actualDuration < 40) {
+      console.log(`[FRAUD FLAG] User ${sanitizedEmail} completed 8 questions in ${actualDuration}s. Flagged as bot.`);
+      // Save the data but DO NOT pay tokens
+      await supabase.from("syntrix_claims").insert([{
+        email: sanitizedEmail,
+        amount_rewarded: 0,
+        status: "flagged",
+        referral_code: generatedReferralCode,
+        survey_data: survey_data,
+        survey_duration_seconds: actualDuration,
+        persona_badge: persona_badge || "Analyzer",
+        selfie_verified: selfie_verified || false,
+        selfie_consent: selfie_consent || false,
+        selfie_asset_url: selfie_asset_url || null
+      }]);
+      return res.status(200).json({ success: true, warning: "Speed threshold triggered. Manual review required.", rewarded: 0 });
+    }
+
+    // ---- TIME-BASED REWARD CALCULATION ----
+    let surveyReward = 0;
+    if (actualDuration <= 180) surveyReward = 10;       // 1-3 mins
+    else if (actualDuration <= 300) surveyReward = 25;   // 3-5 mins
+    else if (actualDuration <= 600) surveyReward = 45;   // 5-10 mins
+    else if (actualDuration <= 900) surveyReward = 65;   // 10-15 mins
+    else surveyReward = 85;                               // 15-20 mins
 
     let referrerRecord = null;
     let isReferralValid = false;
@@ -354,22 +384,37 @@ app.post("/api/submit-survey", async (req, res) => {
       isReferralValid = true;
     }
 
-    const userXpProfile = await getXPProfile(supabase, sanitizedEmail);
-    const surveyRewardInfo = calculateFinalTaskReward(48, userXpProfile ? userXpProfile.currentLevel : 1, userXpProfile ? userXpProfile.dailyStreak : 0);
-
     const { error: claimError } = await supabase
       .from("syntrix_claims")
       .insert([{
         email: sanitizedEmail,
-        amount_rewarded: surveyRewardInfo.finalReward,
+        amount_rewarded: surveyReward,
         status: "pending",
         referral_code: generatedReferralCode,
         survey_data: survey_data,
-        survey_duration_seconds: Math.floor(timeTaken / 1000),
-        persona_badge: persona_badge || "Analyzer"
+        survey_duration_seconds: actualDuration,
+        persona_badge: persona_badge || "Analyzer",
+        selfie_verified: selfie_verified || false,
+        selfie_consent: selfie_consent || false,
+        selfie_asset_url: selfie_asset_url || null
       }]);
 
     if (claimError) return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
+
+    // Credit user's balance
+    const { data: userData } = await supabase
+      .from("users")
+      .select("synx_balance, pendingRewards")
+      .eq("email", sanitizedEmail)
+      .single();
+
+    if (userData) {
+      await supabase.from("users").update({
+        synx_balance: (userData.synx_balance || 0) + surveyReward,
+        pendingRewards: (userData.pendingRewards || 0) + surveyReward,
+        has_completed_survey: true
+      }).eq("email", sanitizedEmail);
+    }
 
     await awardXP(supabase, sanitizedEmail, 300, "Survey Completed", "survey");
 
@@ -390,8 +435,7 @@ app.post("/api/submit-survey", async (req, res) => {
     return res.json({
       success: true,
       referralCode: generatedReferralCode,
-      rewardAmount: surveyRewardInfo.finalReward,
-      multiplierApplied: surveyRewardInfo.totalMultiplier,
+      rewarded: surveyReward,
       message: "Survey data successfully stored."
     });
 
