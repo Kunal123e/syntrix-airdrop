@@ -205,8 +205,10 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   }
 
   // ---- 2. AI Verification ----
+  var specificTask = job.assigned_task || "Clear authentic human face looking at the camera";
+
   var qualityRules = isSelfie
-    ? "Is it a clear, authentic photograph of a real human face taken by a camera? You MUST reject AI-generated faces, cartoons, drawings, photos of photos, and screen captures. Provide a specific reason if it fails."
+    ? "You are a STRICT auditor. Is this a clear, authentic photograph of a real human face taken by a camera? You MUST reject AI-generated faces, cartoons, drawings, photos of screens, or masks. CRITICAL: You must also verify if the user explicitly complied with this specific directive: '" + specificTask + "'. If they failed this specific directive, or if the lighting/angle is wrong, set quality_pass to false and explain exactly why they failed the specific directive."
     : "You are a STRINGENT data quality gatekeeper. You MUST reject this image if ANY of the following are true: (a) It is a screenshot or screen capture of any device. (b) It contains digital/typed/printed text from a computer, phone, or textbook. (c) It is a photo of a textbook, printed book page, or PDF document. (d) It is a random photo of an object, animal, scenery, or food that is NOT a document. (e) It is a blank or nearly blank page. (f) It contains human faces, selfies, or portrait photos. You may ONLY approve images that are authentic photographs of PHYSICAL, HANDWRITTEN notes written on real paper containing: " + (job.content_tags ? job.content_tags.join(", ") : "academic content") + ". The handwriting must be clearly visible and the content must be educational or informational. If rejecting, state the exact reason like 'Screenshot detected', 'Printed/digital text - not handwritten', 'Random photo - not a document', or 'Textbook page - not handwritten notes'.";
 
   var combinedPrompt;
@@ -734,3 +736,4 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
