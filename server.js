@@ -240,8 +240,8 @@ app.post("/api/send-otp", async (req, res) => {
   }
 });
 
-app.post("/api/verify-otp", (req, res) => {
-  const { email, otp } = req.body;
+app.post("/api/verify-otp", async (req, res) => {
+  const { email, otp, referral_code } = req.body;
   if (!email || !otp) return res.status(400).json({ error: "Email and OTP required." });
 
   const sanitizedEmail = email.trim().toLowerCase();
@@ -255,6 +255,37 @@ app.post("/api/verify-otp", (req, res) => {
   if (record.otp !== otp.trim()) return res.status(400).json({ error: "Invalid OTP code." });
 
   delete otpStorage[sanitizedEmail];
+
+  // ---- Normalize & Save Referral Code ----
+  let normalizedRef = null;
+  if (referral_code && referral_code.trim().length > 0) {
+    let raw = referral_code.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    // Strip existing SYN prefix if user typed it
+    if (raw.startsWith("SYN")) raw = raw.substring(3);
+    if (raw.length > 0) normalizedRef = "SYN-" + raw;
+  }
+
+  // Upsert user record with referred_by code
+  try {
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", sanitizedEmail)
+      .maybeSingle();
+
+    if (existingUser) {
+      // Only update referred_by if it hasn't been set yet
+      if (normalizedRef) {
+        await supabase.from("users").update({ referred_by: normalizedRef }).eq("email", sanitizedEmail).is("referred_by", null);
+      }
+    } else {
+      await supabase.from("users").insert([{ email: sanitizedEmail, referred_by: normalizedRef }]);
+    }
+  } catch (dbErr) {
+    console.error("[VERIFY-OTP] Referral save failed:", dbErr.message);
+    // Non-fatal: don't block OTP success
+  }
+
   return res.json({ success: true });
 });
 
