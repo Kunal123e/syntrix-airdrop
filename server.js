@@ -774,47 +774,45 @@ function getBucketFilePathFromUrl(publicUrl) {
 
 // ================= BACKEND-INTERCEPT BUCKET UPLOAD =================
 app.post("/api/upload-task", async (req, res) => {
-  const { userEmail, taskType, fileName, imageBase64, contentTags } = req.body;
+  const { email, userEmail, taskType, fileName, imageBase64, contentTags, assignedTask } = req.body;
+  const actualEmail = userEmail || email;
 
-  if (!userEmail || !taskType || !fileName || !imageBase64) {
+  if (!actualEmail || !taskType || !fileName || !imageBase64) {
     return res.status(400).json({ error: "Missing required document fields." });
   }
 
-  const sanitizedEmail = userEmail.trim().toLowerCase();
-
-  // Sanitize the filename to strip out spaces and special characters
+  const sanitizedEmail = actualEmail.trim().toLowerCase();
   const safeFileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
 
   try {
-    // 1. Convert Base64 to Buffer
     const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
     const buffer = Buffer.from(base64Data, "base64");
 
-    // 2. Upload directly to Supabase Bucket "pending" folder with SAFE filename
+    const imageHash = crypto.createHash("sha256").update(buffer).digest("hex");
+
     const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${safeFileName}`;
     const { error: uploadError } = await supabase.storage
       .from("verified_assets")
       .upload(storagePath, buffer, { contentType: "image/jpeg" });
 
-    if (uploadError) throw new Error(`Bucket upload failed: ${uploadError.message}`);
+    if (uploadError) throw new Error("Bucket upload failed: " + uploadError.message);
 
-    // 3. Get Public URL
     const { data: publicUrlData } = supabase.storage.from("verified_assets").getPublicUrl(storagePath);
 
-    // 4. Save tiny URL to Database (NO BLOAT)
-    const { error: dbError } = await supabase.from("syntrix_submissions").insert([{
-      email: sanitizedEmail,
+    const { error: dbError } = await supabase.from("upload_jobs").insert([{
+      user_email: sanitizedEmail,
       task_type: taskType,
       file_name: safeFileName,
       storage_url: publicUrlData.publicUrl,
-      contentTags: contentTags || [],
-      status: "pending"
+      file_hash: imageHash,
+      status: "QUEUED",
+      content_tags: contentTags || ["none"],
+      assigned_task: assignedTask || null
     }]);
 
     if (dbError) throw dbError;
 
     res.json({ success: true, message: "Queued for AI Verification" });
-    // Legacy queue engine call removed to prevent ReferenceError crash.
     
   } catch (err) {
     return res.status(500).json({ error: "Ingestion failed: " + err.message });
@@ -1098,3 +1096,8 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
+
+
+
+
