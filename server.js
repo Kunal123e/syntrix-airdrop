@@ -787,13 +787,11 @@ app.post("/api/upload-task", async (req, res) => {
   try {
     const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
     const buffer = Buffer.from(base64Data, "base64");
-
     const imageHash = crypto.createHash("sha256").update(buffer).digest("hex");
 
-    const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${safeFileName}`;
-    
-    // Generate valid UUID for the batch
-    const singleBatchId = crypto.randomUUID();
+    // DIVERSIFIED STORAGE PATH: Isolate selfies from documents
+    const folderCategory = taskType === 'selfie' ? 'selfies' : 'documents';
+    const storagePath = `pending/${sanitizedEmail}/${folderCategory}/${Date.now()}_${safeFileName}`;
 
     const { error: uploadError } = await supabase.storage
       .from("verified_assets")
@@ -803,20 +801,9 @@ app.post("/api/upload-task", async (req, res) => {
 
     const { data: publicUrlData } = supabase.storage.from("verified_assets").getPublicUrl(storagePath);
 
-    // FIX: Must insert parent batch to satisfy foreign key constraints before inserting the job
-    const { error: batchErr } = await supabase.from('upload_batches').insert([{
-        id: singleBatchId,
-        user_email: sanitizedEmail,
-        total_files: 1,
-        status: 'PROCESSING'
-    }]);
-
-    if (batchErr) {
-        console.warn("[UPLOAD] Non-fatal batch creation warning:", batchErr.message);
-    }
-
+    // Insert directly into upload_jobs without creating ghost rows in upload_batches
     const { error: dbError } = await supabase.from("upload_jobs").insert([{
-      batch_id: singleBatchId,
+      batch_id: null, // Clean isolation: single tasks do not belong to a batch
       user_email: sanitizedEmail,
       task_type: taskType,
       file_name: safeFileName,
@@ -1113,6 +1100,7 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
 
 
 
