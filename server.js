@@ -793,7 +793,7 @@ app.post("/api/upload-task", async (req, res) => {
         const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${safeFileName}`;
     
     // NEW: Generate a fallback batch ID for single uploads to satisfy Supabase constraint
-    const singleBatchId = `SINGLE-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const singleBatchId = crypto.randomUUID();
 
     const { error: uploadError } = await supabase.storage
       .from("verified_assets")
@@ -1101,6 +1101,7 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
 
 
 
