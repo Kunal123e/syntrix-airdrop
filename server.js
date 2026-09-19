@@ -790,9 +790,9 @@ app.post("/api/upload-task", async (req, res) => {
 
     const imageHash = crypto.createHash("sha256").update(buffer).digest("hex");
 
-        const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${safeFileName}`;
+    const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${safeFileName}`;
     
-    // NEW: Generate a fallback batch ID for single uploads to satisfy Supabase constraint
+    // Generate valid UUID for the batch
     const singleBatchId = crypto.randomUUID();
 
     const { error: uploadError } = await supabase.storage
@@ -802,6 +802,18 @@ app.post("/api/upload-task", async (req, res) => {
     if (uploadError) throw new Error("Bucket upload failed: " + uploadError.message);
 
     const { data: publicUrlData } = supabase.storage.from("verified_assets").getPublicUrl(storagePath);
+
+    // FIX: Must insert parent batch to satisfy foreign key constraints before inserting the job
+    const { error: batchErr } = await supabase.from('upload_batches').insert([{
+        id: singleBatchId,
+        user_email: sanitizedEmail,
+        total_files: 1,
+        status: 'PROCESSING'
+    }]);
+
+    if (batchErr) {
+        console.warn("[UPLOAD] Non-fatal batch creation warning:", batchErr.message);
+    }
 
     const { error: dbError } = await supabase.from("upload_jobs").insert([{
       batch_id: singleBatchId,
@@ -1101,6 +1113,7 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
 
 
 
