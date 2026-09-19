@@ -790,7 +790,11 @@ app.post("/api/upload-task", async (req, res) => {
 
     const imageHash = crypto.createHash("sha256").update(buffer).digest("hex");
 
-    const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${safeFileName}`;
+        const storagePath = `pending/${sanitizedEmail}/${Date.now()}_${safeFileName}`;
+    
+    // NEW: Generate a fallback batch ID for single uploads to satisfy Supabase constraint
+    const singleBatchId = `SINGLE-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+
     const { error: uploadError } = await supabase.storage
       .from("verified_assets")
       .upload(storagePath, buffer, { contentType: "image/jpeg" });
@@ -800,6 +804,7 @@ app.post("/api/upload-task", async (req, res) => {
     const { data: publicUrlData } = supabase.storage.from("verified_assets").getPublicUrl(storagePath);
 
     const { error: dbError } = await supabase.from("upload_jobs").insert([{
+      batch_id: singleBatchId,
       user_email: sanitizedEmail,
       task_type: taskType,
       file_name: safeFileName,
@@ -1096,6 +1101,7 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
 
 
 
