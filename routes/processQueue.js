@@ -216,11 +216,13 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
     combinedPrompt = "You are an extremely strict security AI validator for a data quality platform. Your job is to PROTECT the dataset from low-quality or fraudulent submissions. When in doubt, REJECT. Evaluate this image for:\n" +
       "1. QUALITY: " + qualityRules + "\n" +
       "2. PII: Does this image contain Sensitive Personal Identifiable Information (phone numbers, home addresses, government IDs like Aadhaar/SSN, bank account numbers, or passwords)?\n" +
-      'You MUST respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "reason": "Concise specific reason for your decision"}';
+      "3. VISUAL SIGNATURE: Generate a compact descriptor of the person's appearance. Include clothing color/type, facial hair status, background environment, and lighting. Example: 'blue_tshirt_clean_shaven_white_wall_natural_light'. This is used to prevent duplicate dataset entries.\n" +
+      'You MUST respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "visual_signature": "compact_descriptor_string", "reason": "Concise specific reason for your decision"}';
   } else {
     combinedPrompt = "Evaluate this document and return a JSON object with 'quality_pass', 'category_tier', 'quality_score', and 'contains_pii'. " +
       "If 'contains_pii' is true (SSN, credit cards, sensitive IDs, Aadhaar numbers, bank account numbers, passwords), immediately flag for purging: set quality_pass to false and yield quality_score 0. " +
       "If false, calculate 'quality_score' (0-100) strictly based on: 40% Information Density (extractable entities/tables), 30% Visual Integrity (OCR confidence, lighting, no glare), 20% Structural Complexity (handwritten margins, mixed layouts), 10% Rarity (unique localized formats). " +
+      "GRADING HARSHNESS: A score of 100 should be virtually impossible (0.001% probability). Reserve 90+ ONLY for flawless, perfectly lit, highly dense academic notes with zero artifacts. Most decent submissions should score 60-80. Be ruthless. " +
       "Classify 'category_tier' as 1 (High Value: Invoices, Contracts, Medical Records), 2 (Mid Value: Receipts, Handwritten Notes, Academic), or 3 (Low Value: Menus, Flyers, Generic Prints). " +
       "ADDITIONAL REJECTION RULES: " + qualityRules + " " +
       "If the image fails quality rules, set quality_pass to false and quality_score to 0. " +
@@ -348,41 +350,84 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   }
 
   // ---- 6. APPROVAL: Move file to verified folder ----
+
+  // ---- 6a. VISUAL SIGNATURE ANTI-FRAUD (Selfies Only) ----
+  if (isSelfie && aiVerdict.visual_signature) {
+    var { data: pastSelfies } = await supabase
+      .from("upload_jobs")
+      .select("visual_signature")
+      .eq("user_email", job.user_email)
+      .eq("task_type", "selfie")
+      .eq("status", "VERIFIED")
+      .not("visual_signature", "is", null)
+      .neq("id", job.id);
+
+    if (pastSelfies && pastSelfies.length > 0) {
+      var newSigWords = aiVerdict.visual_signature.toLowerCase().split("_");
+      for (var ps = 0; ps < pastSelfies.length; ps++) {
+        var oldSigWords = (pastSelfies[ps].visual_signature || "").toLowerCase().split("_");
+        var matchCount = 0;
+        for (var w = 0; w < newSigWords.length; w++) {
+          if (oldSigWords.indexOf(newSigWords[w]) !== -1) matchCount++;
+        }
+        var similarity = newSigWords.length > 0 ? (matchCount / newSigWords.length) : 0;
+        if (similarity >= 0.8) {
+          if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
+          await supabase.from("upload_jobs").update({
+            status: "REJECTED",
+            error_code: "VISUAL_DUPLICATE",
+            reason: "Visual duplicate detected. To ensure dataset variance, please change your clothing, lighting, or background environment.",
+            visual_signature: aiVerdict.visual_signature,
+            processed_at: new Date().toISOString()
+          }).eq("id", job.id);
+          return { jobId: job.id, result: "REJECTED", reason: "Visual duplicate detected" };
+        }
+      }
+    }
+  }
+
   var verifiedPath = "verified/" + job.user_email + "/" + Date.now() + "_" + job.file_name;
   if (relativeFilePath) {
     await supabase.storage.from("verified_assets").move(relativeFilePath, verifiedPath);
   }
   var { data: finalUrlData } = supabase.storage.from("verified_assets").getPublicUrl(verifiedPath);
 
-  // ---- 7. Calculate reward (Tier Multiplier Matrix) ----
+  // ---- 7. Calculate reward (Fractional Batch Formula) ----
   var rewardAmount = 0;
 
   if (isSelfie) {
-    // Selfies use flat base reward
-    rewardAmount = 48;
+    // Selfies: flat 40 SYNX
+    rewardAmount = 40;
   } else {
-    // Documents use the Category Tier x Quality Score matrix
-    var maxSynx = 0;
-    var categoryTier = aiVerdict.category_tier || 3;
-    if (categoryTier === 1) maxSynx = 100;
-    else if (categoryTier === 2) maxSynx = 50;
-    else if (categoryTier === 3) maxSynx = 20;
+    // Documents: Fractional formula = (Files_in_Batch / 5) * 100 * (quality_score / 100)
+    // Max 5 files, max 20 SYNX per file, max 100 SYNX per batch
+    var batchFileCount = 1;
+    if (job.batch_id) {
+      var { data: batchInfo } = await supabase
+        .from("upload_batches")
+        .select("total_jobs")
+        .eq("id", job.batch_id)
+        .maybeSingle();
+      if (batchInfo && batchInfo.total_jobs) {
+        batchFileCount = Math.min(batchInfo.total_jobs, 5); // Cap at 5
+      }
+    }
 
     var qualityScore = aiVerdict.quality_score || 0;
-    if (qualityScore >= 90) rewardAmount = maxSynx;
-    else if (qualityScore >= 80) rewardAmount = Math.floor(maxSynx * 0.8);
-    else if (qualityScore >= 70) rewardAmount = Math.floor(maxSynx * 0.5);
-    else {
+    if (qualityScore < 70) {
       // Sub-70 data is rejected to protect commercial packages
       if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
       await supabase.from("upload_jobs").update({
         status: "REJECTED",
         error_code: "LOW_QUALITY_SCORE",
-        reason: "Quality score " + qualityScore + "/100 below minimum threshold (70). Category Tier " + categoryTier + ".",
+        reason: "Quality score " + qualityScore + "/100 below minimum threshold (70). Tier " + (aiVerdict.category_tier || 3) + ".",
         processed_at: new Date().toISOString()
       }).eq("id", job.id);
       return { jobId: job.id, result: "REJECTED", reason: "Quality score " + qualityScore + "/100 below threshold" };
     }
+
+    rewardAmount = Math.floor((batchFileCount / 5) * 100 * (qualityScore / 100));
+    rewardAmount = Math.min(rewardAmount, batchFileCount * 20); // Hard cap: 20 SYNX per file
   }
 
   // Apply XP multiplier on top of the tier-based reward
@@ -409,6 +454,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
       storage_url: finalUrlData ? finalUrlData.publicUrl : job.storage_url,
       file_hash: imageHash,
       embedding: finalEmbedding,
+      visual_signature: aiVerdict.visual_signature || null,
       reward_amount: rewardAmount,
       reward_awarded: true,
       reason: "Verified Successfully | Hash:" + imageHash + " | Paid " + rewardAmount + " SYNX",
