@@ -784,6 +784,22 @@ app.post("/api/upload-task", async (req, res) => {
   const sanitizedEmail = actualEmail.trim().toLowerCase();
   const safeFileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
 
+  // STRICT 24-HOUR LIMITER FOR SELFIES
+  if (taskType === 'selfie') {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: recentSelfie } = await supabase
+      .from("upload_jobs")
+      .select("id")
+      .eq("user_email", sanitizedEmail)
+      .eq("task_type", "selfie")
+      .gte("created_at", oneDayAgo)
+      .limit(1);
+
+    if (recentSelfie && recentSelfie.length > 0) {
+      return res.status(429).json({ error: "Daily limit reached. Please wait 24 hours before submitting another AI Photo Task." });
+    }
+  }
+
   try {
     const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
     const buffer = Buffer.from(base64Data, "base64");
