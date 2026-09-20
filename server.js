@@ -483,7 +483,15 @@ app.get("/api/user-status", async (req, res) => {
 
   try {
     const sanitizedEmail = email.trim().toLowerCase();
-    await awardXP(supabase, sanitizedEmail, 10, "Daily Login", "login");
+    // RATE LIMIT DAILY LOGIN XP TO ONCE PER 24 HOURS
+    const { data: userRecord } = await supabase.from("users").select("last_login").eq("email", sanitizedEmail).maybeSingle();
+    const now = Date.now();
+    const twentyFourHours = 24 * 60 * 60 * 1000;
+    
+    if (!userRecord || !userRecord.last_login || (now - new Date(userRecord.last_login).getTime()) > twentyFourHours) {
+        await awardXP(supabase, sanitizedEmail, 10, "Daily Login", "login");
+        await supabase.from("users").update({ last_login: new Date().toISOString() }).eq("email", sanitizedEmail);
+    }
 
     const { data: userProfile, error } = await supabase
       .from("syntrix_claims")
