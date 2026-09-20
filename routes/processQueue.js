@@ -16,106 +16,29 @@ const { GoogleGenAI } = require("@google/genai");
 const router = express.Router();
 
 // =====================================================================
-// HELPER: Get a non-cooldown Gemini API key from the DB
+// IN-MEMORY 3-KEY GEMINI ROTATOR
 // =====================================================================
+const SELFIE_KEYS = [process.env.GEMINI_API_KEY_SELFIE_1, process.env.GEMINI_API_KEY].filter(Boolean);
+const DOC_KEYS = [process.env.GEMINI_API_KEY_DOC_1, process.env.GEMINI_API_KEY_DOC_2, process.env.GEMINI_API_KEY].filter(Boolean);
+let selfieIndex = 0; 
+let docIndex = 0;
+
 async function getAvailableKey(supabase, taskType) {
-  var keyPrefix = taskType === "selfie" ? "GEMINI_SELFIE_KEY_%" : "GEMINI_DOCUMENT_KEY_%";
-  const { data: keys, error } = await supabase
-    .from("gemini_key_status")
-    .select("*")
-    .like("key_name", keyPrefix)
-    .order("total_calls", { ascending: true }); // prefer least-used key
-
-  if (error || !keys || keys.length === 0) return null;
-
-  const now = new Date();
-
-  for (var i = 0; i < keys.length; i++) {
-    var key = keys[i];
-
-    // If cooldown has expired, clear it
-    if (key.is_on_cooldown && key.cooldown_until) {
-      var cooldownEnd = new Date(key.cooldown_until);
-      if (now >= cooldownEnd) {
-        await supabase
-          .from("gemini_key_status")
-          .update({ is_on_cooldown: false })
-          .eq("key_name", key.key_name);
-        key.is_on_cooldown = false;
-      }
-    }
-
-    if (!key.is_on_cooldown) {
-      return key.key_name;
-    }
+  if (taskType === 'selfie' && SELFIE_KEYS.length > 0) {
+    const key = SELFIE_KEYS[selfieIndex];
+    selfieIndex = (selfieIndex + 1) % SELFIE_KEYS.length;
+    return key;
+  } else if (DOC_KEYS.length > 0) {
+    const key = DOC_KEYS[docIndex];
+    docIndex = (docIndex + 1) % DOC_KEYS.length;
+    return key;
   }
-
-  return null; // All keys on cooldown
+  return process.env.GEMINI_API_KEY;
 }
 
-// =====================================================================
-// HELPER: Mark a key as on cooldown (2 minute window)
-// =====================================================================
-async function markKeyCooldown(supabase, keyName) {
-  const cooldownUntil = new Date(Date.now() + 2 * 60 * 1000).toISOString(); // 2 minutes
-  await supabase
-    .from("gemini_key_status")
-    .update({
-      is_on_cooldown: true,
-      cooldown_until: cooldownUntil,
-      total_errors: supabase.rpc ? undefined : 0 // increment handled below
-    })
-    .eq("key_name", keyName);
-
-  // Increment error count
-  await supabase.rpc("increment_key_errors", { target_key: keyName }).catch(function() {
-    // If RPC doesn't exist, do manual increment
-    supabase
-      .from("gemini_key_status")
-      .select("total_errors")
-      .eq("key_name", keyName)
-      .single()
-      .then(function(res) {
-        if (res.data) {
-          supabase
-            .from("gemini_key_status")
-            .update({ total_errors: (res.data.total_errors || 0) + 1 })
-            .eq("key_name", keyName);
-        }
-      });
-  });
-}
-
-// =====================================================================
-// HELPER: Increment key call count
-// =====================================================================
-async function incrementKeyCallCount(supabase, keyName) {
-  var { data } = await supabase
-    .from("gemini_key_status")
-    .select("total_calls")
-    .eq("key_name", keyName)
-    .single();
-
-  if (data) {
-    await supabase
-      .from("gemini_key_status")
-      .update({ total_calls: (data.total_calls || 0) + 1 })
-      .eq("key_name", keyName);
-  }
-}
-
-// =====================================================================
-// HELPER: Resolve env var key name to actual API key string
-// =====================================================================
-function resolveKeyValue(keyName) {
-  var mapping = {
-    "GEMINI_DOCUMENT_KEY_1": process.env.GEMINI_DOCUMENT_KEY_1 || process.env.GEMINI_API_KEY_DOCS || process.env.GEMINI_API_KEY,
-    "GEMINI_DOCUMENT_KEY_2": process.env.GEMINI_DOCUMENT_KEY_2 || process.env.GEMINI_BACKUP_KEY || process.env.GEMINI_API_KEY,
-    "GEMINI_SELFIE_KEY_1": process.env.GEMINI_API_SELFIE || process.env.GEMINI_API_KEY,
-    "GEMINI_SELFIE_KEY_2": process.env.GEMINI_API_SELFIE || process.env.GEMINI_API_KEY
-  };
-  return mapping[keyName] || process.env.GEMINI_API_KEY;
-}
+async function markKeyCooldown(supabase, keyName) { return; }
+async function incrementKeyCallCount(supabase, keyName) { return; }
+function resolveKeyValue(keyName) { return keyName; }
 
 // =====================================================================
 // HELPER: Extract relative bucket path from a Supabase public URL
