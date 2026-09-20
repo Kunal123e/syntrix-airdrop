@@ -792,6 +792,9 @@ app.post("/api/upload-task", async (req, res) => {
     // DIVERSIFIED STORAGE PATH: Isolate selfies from documents
     const folderCategory = taskType === 'selfie' ? 'selfies' : 'documents';
     const storagePath = `pending/${sanitizedEmail}/${folderCategory}/${Date.now()}_${safeFileName}`;
+    
+    // Generate valid UUID for the batch
+    const singleBatchId = crypto.randomUUID();
 
     const { error: uploadError } = await supabase.storage
       .from("verified_assets")
@@ -801,9 +804,20 @@ app.post("/api/upload-task", async (req, res) => {
 
     const { data: publicUrlData } = supabase.storage.from("verified_assets").getPublicUrl(storagePath);
 
-    // Insert directly into upload_jobs without creating ghost rows in upload_batches
+    // CRITICAL FIX: Must insert parent batch to satisfy foreign key constraints
+    const { error: batchErr } = await supabase.from('upload_batches').insert([{
+        id: singleBatchId,
+        user_email: sanitizedEmail,
+        total_files: 1,
+        status: 'PROCESSING'
+    }]);
+
+    if (batchErr) {
+        console.warn("[UPLOAD] Non-fatal batch creation warning:", batchErr.message);
+    }
+
     const { error: dbError } = await supabase.from("upload_jobs").insert([{
-      batch_id: null, // Clean isolation: single tasks do not belong to a batch
+      batch_id: singleBatchId,
       user_email: sanitizedEmail,
       task_type: taskType,
       file_name: safeFileName,
@@ -1100,6 +1114,7 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
 
 
 
