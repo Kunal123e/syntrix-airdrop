@@ -125,6 +125,7 @@ async function awardXP(supabase, email, amount, reason, category = null) {
     // 🚀 3. EXACT DAILY STREAK CALCULATION LOGIC
     let daily_streak = profile.daily_streak || 0;
     let last_login_date = profile.last_login_date || null;
+    let streak_status = "active";
     
     // Use strict UTC date to avoid local timezone abuse
     const now = new Date();
@@ -140,10 +141,22 @@ async function awardXP(supabase, email, amount, reason, category = null) {
         yesterdayDate.setDate(yesterdayDate.getDate() - 1);
         const yesterday = yesterdayDate.toISOString().split('T')[0];
 
+        const twoDaysAgoDate = new Date(now);
+        twoDaysAgoDate.setDate(twoDaysAgoDate.getDate() - 2);
+        const twoDaysAgo = twoDaysAgoDate.toISOString().split('T')[0];
+
         if (last_login_date === yesterday) {
-            daily_streak += 1; // Streak preserved and increased!
+            daily_streak += 1; // Logged in consecutively!
+            streak_status = "active";
+        } else if (last_login_date === twoDaysAgo) {
+            // They missed 1 day (yesterday) but logged in today before 2 full days passed.
+            // Maintain the streak, but mark as warned/recovered!
+            daily_streak += 1; 
+            streak_status = "warning"; // "Streak Off" state
         } else {
-            daily_streak = 1; // Streak broken, reset back to Day 1
+            // Missed 2 or more days. Streak goes back to 0.
+            daily_streak = 1; 
+            streak_status = "lost";
         }
         last_login_date = today;
     }
@@ -175,7 +188,7 @@ async function awardXP(supabase, email, amount, reason, category = null) {
       reason: reason
     }]);
 
-    console.log(`[XP ENGINE] +${amount} XP -> ${sanitizedEmail} ('${reason}'). Level: ${level}, Streak: ${daily_streak}`);
+    console.log(`[XP ENGINE] +${amount} XP -> ${sanitizedEmail} ('${reason}'). Level: ${level}, Streak: ${daily_streak} [${streak_status}]`);
 
   } catch (err) {
     console.error('[XP ENGINE ERROR]:', err.message);
@@ -202,11 +215,35 @@ async function getXPProfile(supabase, email) {
       levelProgressPercentage: 0,
       highestLevel: 1,
       dailyStreak: 0,
+      streakStatus: "active",
       multiplier: 1.0,
       streakBonusPercent: 0,
       totalMultiplier: 1.0,
       recentHistory: []
     };
+  }
+  
+  // LIVE STREAK EVALUATION (Checks if streak has expired since last login)
+  let liveStreak = profile.daily_streak || 0;
+  let streakStatus = "active";
+  if (profile.last_login_date) {
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    const yesterdayDate = new Date(now);
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterday = yesterdayDate.toISOString().split('T')[0];
+    const twoDaysAgoDate = new Date(now);
+    twoDaysAgoDate.setDate(twoDaysAgoDate.getDate() - 2);
+    const twoDaysAgo = twoDaysAgoDate.toISOString().split('T')[0];
+
+    if (profile.last_login_date !== today && profile.last_login_date !== yesterday) {
+      if (profile.last_login_date === twoDaysAgo) {
+        streakStatus = "warning"; // Missed 1 full day, in danger
+      } else {
+        liveStreak = 0; // Missed 2+ days, streak is dead
+        streakStatus = "lost";
+      }
+    }
   }
 
   const { level, rank, currentLevelStartXP, nextLevelXP } = calculateLevelAndRank(profile.total_xp);
@@ -222,7 +259,7 @@ async function getXPProfile(supabase, email) {
     .limit(5);
 
   // 🚀 Expose financial multiplier stats to the UI
-  const rewardStats = calculateFinalTaskReward(48, level, profile.daily_streak);
+  const rewardStats = calculateFinalTaskReward(48, level, liveStreak);
 
   return {
     totalXP: profile.total_xp,
@@ -234,7 +271,8 @@ async function getXPProfile(supabase, email) {
     xpRemaining: nextLevelXP - profile.total_xp,
     levelProgressPercentage: progressPercentage,
     highestLevel: profile.highest_level,
-    dailyStreak: profile.daily_streak || 0,
+    dailyStreak: liveStreak,
+    streakStatus: streakStatus, // Passes "active", "warning", or "lost" to UI
     surveyCount: profile.survey_count || 0,
     documentCount: profile.document_count || 0,
     selfieCount: profile.selfie_count || 0,
