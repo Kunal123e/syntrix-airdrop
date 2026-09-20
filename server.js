@@ -793,9 +793,6 @@ app.post("/api/upload-task", async (req, res) => {
     const folderCategory = taskType === 'selfie' ? 'selfies' : 'documents';
     const storagePath = `pending/${sanitizedEmail}/${folderCategory}/${Date.now()}_${safeFileName}`;
     
-    // Generate valid UUID for the batch
-    const singleBatchId = crypto.randomUUID();
-
     const { error: uploadError } = await supabase.storage
       .from("verified_assets")
       .upload(storagePath, buffer, { contentType: "image/jpeg" });
@@ -804,20 +801,20 @@ app.post("/api/upload-task", async (req, res) => {
 
     const { data: publicUrlData } = supabase.storage.from("verified_assets").getPublicUrl(storagePath);
 
-    // CRITICAL FIX: Must insert parent batch to satisfy foreign key constraints
-    const { error: batchErr } = await supabase.from('upload_batches').insert([{
-        id: singleBatchId,
+    // CRITICAL FIX: Insert parent batch using correct schema and let Supabase generate the ID
+    const { data: batchData, error: batchErr } = await supabase.from('upload_batches').insert([{
         user_email: sanitizedEmail,
-        total_files: 1,
+        total_jobs: 1,
+        completed_jobs: 0,
         status: 'PROCESSING'
-    }]);
+    }]).select('id').single();
 
-    if (batchErr) {
-        console.warn("[UPLOAD] Non-fatal batch creation warning:", batchErr.message);
+    if (batchErr || !batchData) {
+        throw new Error("Failed to create parent batch: " + (batchErr ? batchErr.message : "No batch data returned"));
     }
 
     const { error: dbError } = await supabase.from("upload_jobs").insert([{
-      batch_id: singleBatchId,
+      batch_id: batchData.id,
       user_email: sanitizedEmail,
       task_type: taskType,
       file_name: safeFileName,
@@ -1114,6 +1111,8 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
+
 
 
 
