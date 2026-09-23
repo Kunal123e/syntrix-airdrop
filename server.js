@@ -488,6 +488,7 @@ app.get("/api/user-status", async (req, res) => {
     const now = Date.now();
     const twentyFourHours = 24 * 60 * 60 * 1000;
     
+    // Only award XP if no last_login exists, or if it has been more than 24 hours
     if (!userRecord || !userRecord.last_login || (now - new Date(userRecord.last_login).getTime()) > twentyFourHours) {
         await awardXP(supabase, sanitizedEmail, 10, "Daily Login", "login");
         await supabase.from("users").update({ last_login: new Date().toISOString() }).eq("email", sanitizedEmail);
@@ -599,7 +600,7 @@ app.post("/api/execute-claim", async (req, res) => {
     const { data: walletMap } = await supabase.from("syntrix_wallets").select("email").eq("wallet_address", sanitizedWallet).maybeSingle();
     if (walletMap && walletMap.email !== email) return res.status(400).json({ error: "This wallet is already linked to another account." });
 
-    const { data: emailMap } = await supabase.from("syntrix_wallets").select("wallet_address").eq("email", email).maybeSingle();
+    const { data: emailMap } = await supabase.from("syntrix_wallets").select("wallet_address").eq("user_email", email).maybeSingle();
     if (emailMap && emailMap.wallet_address.toLowerCase() !== sanitizedWallet) return res.status(400).json({ error: `This email is already associated with a different wallet address: ${emailMap.wallet_address}` });
 
     try {
@@ -759,9 +760,9 @@ app.get("/api/check-submission", async (req, res) => {
 
   try {
     const { data, error } = await supabase
-      .from("syntrix_submissions")
+      .from("upload_jobs")
       .select("status, reason")
-      .eq("email", email.trim().toLowerCase())
+      .eq("user_email", email.trim().toLowerCase())
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -1135,6 +1136,7 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
 
 
 
