@@ -1,5 +1,5 @@
 // =====================================================================
-// POST /api/process-queue — Serverless Queue Processor (Phase 3)
+// POST /api/process-queue â€” Serverless Queue Processor (Phase 3)
 // 
 // Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
 // processes them through Gemini AI with key pooling & rate limit handling,
@@ -64,6 +64,22 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var relativeFilePath = getBucketPathFromUrl(job.storage_url);
   var isSelfie = job.task_type === "selfie";
 
+  // ---- 0. OFFLINE 24-HOUR SELFIE GATEKEEPER ----
+  if (isSelfie) {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: alreadyVerified } = await supabase
+      .from("upload_jobs").select("id").eq("user_email", job.user_email).eq("task_type", "selfie").eq("status", "VERIFIED").gte("processed_at", oneDayAgo).limit(1);
+
+    if (alreadyVerified && alreadyVerified.length > 0) {
+      // A selfie was already verified today. Reject this pending queue item.
+      await supabase.from("upload_jobs").update({
+        status: "REJECTED", error_code: "DAILY_LIMIT_EXCEEDED",
+        reason: "Daily limit reached. Another selfie was already verified today.", processed_at: new Date().toISOString()
+      }).eq("id", job.id);
+      return { jobId: job.id, result: "REJECTED", reason: "Daily selfie limit already fulfilled." };
+    }
+  }
+
   // ---- ATOMIC CLAIMING (PHASE 2) ----
   // Optimistically lock the job so multiple workers don't process it twice
   var { data: claimData, error: claimErr } = await supabase
@@ -115,7 +131,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
     }
     
     if (!hasExifMarker) {
-      // No EXIF data found — likely a screenshot or digitally created image
+      // No EXIF data found â€” likely a screenshot or digitally created image
       if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
       await supabase.from("upload_jobs").update({
         status: "REJECTED",
@@ -165,7 +181,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   } catch (aiErr) {
     var statusCode = aiErr.status || aiErr.statusCode || (aiErr.message && aiErr.message.indexOf("429") !== -1 ? 429 : 0);
     if (statusCode === 429 || statusCode === 503) {
-      // RATE LIMIT HIT — cooldown this key, mark job for retry
+      // RATE LIMIT HIT â€” cooldown this key, mark job for retry
       throw { isRateLimit: true, statusCode: statusCode, message: aiErr.message };
     }
     throw aiErr;
@@ -503,7 +519,7 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
 }
 
 // =====================================================================
-// POST /api/process-queue — The main queue processor endpoint
+// POST /api/process-queue â€” The main queue processor endpoint
 // Secured with x-admin-key header.
 // =====================================================================
 router.post("/", async (req, res) => {
@@ -527,7 +543,7 @@ router.post("/", async (req, res) => {
         calculateFinalTaskReward: xpEngine.calculateFinalTaskReward
       };
     } catch (xpLoadErr) {
-      console.warn("[QUEUE] xpengine.js not found — rewards will use base 48 SYNX without multipliers.");
+      console.warn("[QUEUE] xpengine.js not found â€” rewards will use base 48 SYNX without multipliers.");
     }
 
     // ---- 1. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
@@ -607,7 +623,7 @@ router.post("/", async (req, res) => {
           await supabase.from("upload_jobs").update({
             status: retryStatus,
             error_code: String(jobErr.statusCode),
-            reason: "Rate limited — key " + keyName + " on cooldown",
+            reason: "Rate limited â€” key " + keyName + " on cooldown",
             retry_count: newRetryCount
           }).eq("id", job.id);
 
@@ -677,7 +693,7 @@ router.post("/", async (req, res) => {
 });
 
 // =====================================================================
-// GET /api/process-queue/key-status — View Gemini key pool status
+// GET /api/process-queue/key-status â€” View Gemini key pool status
 // Secured with x-admin-key header.
 // =====================================================================
 router.get("/key-status", async (req, res) => {
@@ -705,4 +721,5 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
 
