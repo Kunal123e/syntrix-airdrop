@@ -155,7 +155,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
     combinedPrompt = "You are an extremely strict security AI validator for a data quality platform. Your job is to PROTECT the dataset from low-quality or fraudulent submissions. When in doubt, REJECT. Evaluate this image for:\n" +
       "1. QUALITY: " + qualityRules + "\n" +
       "2. PII: Does this image contain Sensitive Personal Identifiable Information (phone numbers, home addresses, government IDs like Aadhaar/SSN, bank account numbers, or passwords)?\n" +
-      "3. VISUAL SIGNATURE: Generate a compact descriptor of the person's appearance. Include clothing color/type, facial hair status, background environment, and lighting. Example: 'blue_tshirt_clean_shaven_white_wall_natural_light'. This is used to prevent duplicate dataset entries.\n" +
+      "3. VISUAL SIGNATURE: Generate a compact descriptor of the person's appearance. Include hairstyle, clothing color/type, facial hair status, background environment, and lighting. Example: 'short_hair_blue_tshirt_clean_shaven_white_wall_natural_light'. This is used to prevent duplicate dataset entries.\n" +
       'You MUST respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "visual_signature": "compact_descriptor_string", "reason": "Concise specific reason for your decision"}';
   } else {
     combinedPrompt = "Evaluate this document and return a JSON object with 'quality_pass', 'category_tier', 'quality_score', and 'contains_pii'. " +
@@ -443,6 +443,33 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
     );
   }
 
+  // ---- 11. BATCH SWEEP & CLEANUP (Selfies Only) ----
+  // If one selfie is verified, delete all other pending, queued, or rejected selfies for this user from today to save DB space and API costs.
+  if (isSelfie) {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: sweepJobs } = await supabase
+      .from("upload_jobs")
+      .select("id, storage_url")
+      .eq("user_email", job.user_email)
+      .eq("task_type", "selfie")
+      .gte("created_at", oneDayAgo)
+      .neq("id", job.id); // Don't delete the one we just verified!
+
+    if (sweepJobs && sweepJobs.length > 0) {
+      // 1. Delete images from storage bucket
+      const filesToRemove = sweepJobs.map(sj => getBucketPathFromUrl(sj.storage_url)).filter(Boolean);
+      if (filesToRemove.length > 0) {
+        await supabase.storage.from("verified_assets").remove(filesToRemove);
+      }
+      
+      // 2. Delete rows completely from Supabase
+      const jobIds = sweepJobs.map(sj => sj.id);
+      await supabase.from("upload_jobs").delete().in("id", jobIds);
+      
+      console.log(`[QUEUE SWEEP] Purged ${jobIds.length} redundant/rejected selfie jobs for ${job.user_email}.`);
+    }
+  }
+
   return { jobId: job.id, result: "VERIFIED", reward: rewardAmount };
 }
 
@@ -721,5 +748,8 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
+
+
 
 
