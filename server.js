@@ -797,15 +797,10 @@ app.post("/api/upload-task", async (req, res) => {
   if (taskType === 'selfie') {
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: recentSelfie } = await supabase
-      .from("upload_jobs")
-      .select("id")
-      .eq("user_email", sanitizedEmail)
-      .eq("task_type", "selfie")
-      .gte("created_at", oneDayAgo)
-      .limit(1);
+      .from("upload_jobs").select("id").eq("user_email", sanitizedEmail).eq("task_type", "selfie").gte("created_at", oneDayAgo).in("status", ["VERIFIED", "QUEUED", "PROCESSING", "RETRYING"]).limit(1);
 
     if (recentSelfie && recentSelfie.length > 0) {
-      return res.status(429).json({ error: "Daily limit reached. Please wait 24 hours before submitting another AI Photo Task." });
+      return res.status(429).json({ error: "Task currently pending or daily limit reached. Please wait 24 hours after a successful verification." });
     }
   }
 
@@ -1136,6 +1131,7 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
 
 
 
