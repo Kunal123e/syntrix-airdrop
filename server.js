@@ -849,6 +849,16 @@ app.post("/api/upload-task", async (req, res) => {
 
     res.json({ success: true, message: "Queued for AI Verification" });
     
+    // Auto-wake the worker in the background (Fire and Forget)
+    try {
+        const PORT = process.env.PORT || 5000;
+        const fetchUrl = "http://127.0.0.1:" + PORT + "/api/process-queue";
+        fetch(fetchUrl, {
+            method: "POST",
+            headers: { "x-admin-key": process.env.ADMIN_SECRET_KEY }
+        }).catch(e => {}); // Silent catch for background task
+    } catch(e) {}
+    
   } catch (err) {
     return res.status(500).json({ error: "Ingestion failed: " + err.message });
   }
@@ -896,6 +906,16 @@ setInterval(async () => {
         isWorkerActive = false;
     }
 }, 5000);
+
+app.post("/api/public-wake", async (req, res) => {
+    const PORT = process.env.PORT || 5000;
+    const fetchUrl = "http://127.0.0.1:" + PORT + "/api/process-queue";
+    fetch(fetchUrl, {
+        method: "POST",
+        headers: { "x-admin-key": process.env.ADMIN_SECRET_KEY }
+    }).catch(e => {});
+    res.json({ success: true, message: "Worker signaled." });
+});
 
 app.post("/api/admin/queue/wake", async (req, res) => {
     const adminKey = req.headers["x-admin-key"];
@@ -1131,6 +1151,8 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
+
 
 
 
