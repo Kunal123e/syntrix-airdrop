@@ -1,5 +1,5 @@
 // =====================================================================
-// POST /api/process-queue â€” Serverless Queue Processor (Phase 3)
+// POST /api/process-queue Ã¢â‚¬â€ Serverless Queue Processor (Phase 3)
 // 
 // Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
 // processes them through Gemini AI with key pooling & rate limit handling,
@@ -143,7 +143,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
     }
     
     if (!hasExifMarker) {
-      // No EXIF data found â€” likely a screenshot or digitally created image
+      // No EXIF data found Ã¢â‚¬â€ likely a screenshot or digitally created image
       if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
       await supabase.from("upload_jobs").update({
         status: "REJECTED",
@@ -193,7 +193,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   } catch (aiErr) {
     var statusCode = aiErr.status || aiErr.statusCode || (aiErr.message && aiErr.message.indexOf("429") !== -1 ? 429 : 0);
     if (statusCode === 429 || statusCode === 503) {
-      // RATE LIMIT HIT â€” cooldown this key, mark job for retry
+      // RATE LIMIT HIT Ã¢â‚¬â€ cooldown this key, mark job for retry
       throw { isRateLimit: true, statusCode: statusCode, message: aiErr.message };
     }
     throw aiErr;
@@ -558,7 +558,7 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
 }
 
 // =====================================================================
-// POST /api/process-queue â€” The main queue processor endpoint
+// POST /api/process-queue Ã¢â‚¬â€ The main queue processor endpoint
 // Secured with x-admin-key header.
 // =====================================================================
 router.post("/", async (req, res) => {
@@ -582,7 +582,7 @@ router.post("/", async (req, res) => {
         calculateFinalTaskReward: xpEngine.calculateFinalTaskReward
       };
     } catch (xpLoadErr) {
-      console.warn("[QUEUE] xpengine.js not found â€” rewards will use base 48 SYNX without multipliers.");
+      console.warn("[QUEUE] xpengine.js not found Ã¢â‚¬â€ rewards will use base 48 SYNX without multipliers.");
     }
 
     // ---- 1. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
@@ -662,8 +662,9 @@ router.post("/", async (req, res) => {
           await supabase.from("upload_jobs").update({
             status: retryStatus,
             error_code: String(jobErr.statusCode),
-            reason: "Rate limited â€” key " + keyName + " on cooldown",
-            retry_count: newRetryCount
+            reason: "Rate limited - key " + keyName + " on cooldown",
+            retry_count: newRetryCount,
+            assigned_key: null
           }).eq("id", job.id);
 
           results.push({
@@ -691,7 +692,8 @@ router.post("/", async (req, res) => {
                 error_code: "PROCESSING_ERROR",
                 reason: "System Error: " + (jobErr.message || "Unknown error"),
                 processed_at: new Date().toISOString(),
-                retry_count: newRetryCount
+                retry_count: newRetryCount,
+                assigned_key: null
               }).eq("id", job.id);
               results.push({ jobId: job.id, result: "FAILED", reason: jobErr.message });
           } else {
@@ -700,7 +702,8 @@ router.post("/", async (req, res) => {
                 status: "RETRYING",
                 error_code: "RETRY",
                 reason: "Temporary error: " + (jobErr.message || "Unknown"),
-                retry_count: newRetryCount
+                retry_count: newRetryCount,
+                assigned_key: null
               }).eq("id", job.id);
               results.push({ jobId: job.id, result: "RETRYING", reason: jobErr.message });
           }
@@ -732,7 +735,7 @@ router.post("/", async (req, res) => {
 });
 
 // =====================================================================
-// GET /api/process-queue/key-status â€” View Gemini key pool status
+// GET /api/process-queue/key-status Ã¢â‚¬â€ View Gemini key pool status
 // Secured with x-admin-key header.
 // =====================================================================
 router.get("/key-status", async (req, res) => {
@@ -760,6 +763,8 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
+
 
 
 
