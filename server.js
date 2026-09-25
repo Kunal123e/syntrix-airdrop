@@ -793,11 +793,11 @@ app.post("/api/upload-task", async (req, res) => {
   const sanitizedEmail = actualEmail.trim().toLowerCase();
   const safeFileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
 
-  // STRICT 24-HOUR LIMITER FOR SELFIES
+  // STRICT 24-HOUR LIMITER FOR SELFIES (Testing Mode)
   if (taskType === 'selfie') {
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: recentSelfie } = await supabase
-      .from("upload_jobs").select("id").eq("user_email", sanitizedEmail).eq("task_type", "selfie").gte("created_at", oneDayAgo).in("status", ["VERIFIED", "QUEUED", "PROCESSING", "RETRYING"]).limit(1);
+      .from("upload_jobs").select("id").eq("user_email", sanitizedEmail).eq("task_type", "selfie").gte("created_at", oneDayAgo).in("status", ["VERIFIED"]).limit(1);
 
     if (recentSelfie && recentSelfie.length > 0) {
       return res.status(429).json({ error: "Task currently pending or daily limit reached. Please wait 24 hours after a successful verification." });
@@ -851,8 +851,9 @@ app.post("/api/upload-task", async (req, res) => {
     
     // Auto-wake the worker in the background (Fire and Forget)
     try {
-        const PORT = process.env.PORT || 5000;
-        const fetchUrl = "http://127.0.0.1:" + PORT + "/api/process-queue";
+        const host = req.headers['x-forwarded-host'] || req.get('host');
+        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+        const fetchUrl = `${protocol}://${host}/api/process-queue`;
         fetch(fetchUrl, {
             method: "POST",
             headers: { "x-admin-key": process.env.ADMIN_SECRET_KEY }
@@ -908,10 +909,9 @@ setInterval(async () => {
 }, 5000);
 
 app.post("/api/public-wake", async (req, res) => {
-    // Dynamically grab your live Vercel/Render URL to securely ping the protected AI Queue
     const host = req.headers['x-forwarded-host'] || req.get('host');
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const fetchUrl = ${protocol}://System.Management.Automation.Internal.Host.InternalHost/api/process-queue;
+    const fetchUrl = `${protocol}://${host}/api/process-queue`;
     
     fetch(fetchUrl, {
         method: "POST",
