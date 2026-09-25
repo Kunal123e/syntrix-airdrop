@@ -908,13 +908,17 @@ setInterval(async () => {
 }, 5000);
 
 app.post("/api/public-wake", async (req, res) => {
-    const PORT = process.env.PORT || 5000;
-    const fetchUrl = "http://127.0.0.1:" + PORT + "/api/process-queue";
+    // Dynamically grab your live Vercel/Render URL to securely ping the protected AI Queue
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const fetchUrl = ${protocol}://System.Management.Automation.Internal.Host.InternalHost/api/process-queue;
+    
     fetch(fetchUrl, {
         method: "POST",
         headers: { "x-admin-key": process.env.ADMIN_SECRET_KEY }
-    }).catch(e => {});
-    res.json({ success: true, message: "Worker signaled." });
+    }).catch(e => console.log("Wake error:", e.message));
+    
+    res.json({ success: true, message: "AI Worker signaled." });
 });
 
 app.post("/api/admin/queue/wake", async (req, res) => {
@@ -1151,6 +1155,8 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
+
 
 
 
