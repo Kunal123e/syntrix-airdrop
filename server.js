@@ -873,7 +873,7 @@ app.post("/api/upload-task", async (req, res) => {
     try {
         const { data, error } = await supabase
             .from("upload_jobs")
-            .update({ status: "QUEUED", reason: "Recovered from stale server sleep/crash" })
+            .update({ status: "QUEUED", reason: "Recovered from stale server sleep/crash", assigned_key: null })
             .eq("status", "PROCESSING");
         if (error) console.error("[SYSTEM] Recovery error:", error.message);
         else console.log("[SYSTEM] Cleared stale PROCESSING jobs.");
@@ -1155,6 +1155,7 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
 
 
 
