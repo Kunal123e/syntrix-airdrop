@@ -15,12 +15,23 @@ const crypto = require("crypto");
 const { GoogleGenAI } = require("@google/genai");
 const router = express.Router();
 
-// =====================================================================
-// IN-MEMORY 3-KEY GEMINI ROTATOR
-// =====================================================================
-const SELFIE_KEYS = [process.env.GEMINI_API_KEY_SELFIE_1, process.env.GEMINI_API_KEY].filter(Boolean);
-const DOC_KEYS = [process.env.GEMINI_API_KEY_DOC_1, process.env.GEMINI_API_KEY_DOC_2, process.env.GEMINI_API_KEY].filter(Boolean);
-let selfieIndex = 0; 
+// ---- ENVIRONMENT VARIABLE KEY ROTATOR (EXACT DASHBOARD NAMES) ----
+const SELFIE_KEYS = [
+  process.env.GEMINI_API_SELFIE,
+  process.env.GEMINI_API_SELFIE_2,
+  process.env.GEMINI_API_SELFIE_3,
+  process.env.GEMINI_API_KEY
+].filter(Boolean);
+
+const DOC_KEYS = [
+  process.env.GEMINI_DOCUMENT_KEY_1,
+  process.env.GEMINI_DOCUMENT_KEY_2,
+  process.env.GEMINI_DOCUMENT_KEY_3,
+  process.env.GEMINI_DOCUMENT_KEY_4,
+  process.env.GEMINI_API_KEY
+].filter(Boolean);
+
+let selfieIndex = 0;
 let docIndex = 0;
 
 async function getAvailableKey(supabase, taskType) {
@@ -33,9 +44,10 @@ async function getAvailableKey(supabase, taskType) {
     docIndex = (docIndex + 1) % DOC_KEYS.length;
     return key;
   }
-  return process.env.GEMINI_API_KEY;
+  return process.env.GEMINI_API_KEY || null;
 }
 
+// Stubs to prevent breaking existing calls in processUploadJob
 async function markKeyCooldown(supabase, keyName) { return; }
 async function incrementKeyCallCount(supabase, keyName) { return; }
 function resolveKeyValue(keyName) { return keyName; }
@@ -748,6 +760,7 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
 
 
 
