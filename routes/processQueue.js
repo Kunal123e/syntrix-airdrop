@@ -1,5 +1,5 @@
 // =====================================================================
-// POST /api/process-queue ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Serverless Queue Processor (Phase 3)
+// POST /api/process-queue - Serverless Queue Processor (Phase 3)
 // 
 // Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
 // processes them through Gemini AI with key pooling & rate limit handling,
@@ -158,7 +158,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   } catch (aiErr) {
     var statusCode = aiErr.status || aiErr.statusCode || (aiErr.message && aiErr.message.indexOf("429") !== -1 ? 429 : 0);
     if (statusCode === 429 || statusCode === 503) {
-      // RATE LIMIT HIT ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â cooldown this key, mark job for retry
+      // RATE LIMIT HIT - cooldown this key, mark job for retry
       throw { isRateLimit: true, statusCode: statusCode, message: aiErr.message };
     }
     throw aiErr;
@@ -523,7 +523,7 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
 }
 
 // =====================================================================
-// POST /api/process-queue ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â The main queue processor endpoint
+// POST /api/process-queue - The main queue processor endpoint
 // Secured with x-admin-key header.
 // =====================================================================
 router.post("/", async (req, res) => {
@@ -547,7 +547,7 @@ router.post("/", async (req, res) => {
         calculateFinalTaskReward: xpEngine.calculateFinalTaskReward
       };
     } catch (xpLoadErr) {
-      console.warn("[QUEUE] xpengine.js not found ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â rewards will use base 48 SYNX without multipliers.");
+      console.warn("[QUEUE] xpengine.js not found - rewards will use base 48 SYNX without multipliers.");
     }
 
     // ---- 1. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
@@ -627,7 +627,7 @@ router.post("/", async (req, res) => {
           await supabase.from("upload_jobs").update({
             status: retryStatus,
             error_code: String(jobErr.statusCode),
-            reason: "Queued — AI model is warming up, please wait...",
+            reason: "Queued - AI model is warming up, please wait...",
             retry_count: newRetryCount,
             assigned_key: null
           }).eq("id", job.id);
@@ -700,7 +700,7 @@ router.post("/", async (req, res) => {
 });
 
 // =====================================================================
-// GET /api/process-queue/key-status ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â View Gemini key pool status
+// GET /api/process-queue/key-status - View Gemini key pool status
 // Secured with x-admin-key header.
 // =====================================================================
 router.get("/key-status", async (req, res) => {
