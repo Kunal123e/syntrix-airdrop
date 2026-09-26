@@ -1,5 +1,5 @@
 // =====================================================================
-// POST /api/process-queue Ã¢â‚¬â€ Serverless Queue Processor (Phase 3)
+// POST /api/process-queue ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Serverless Queue Processor (Phase 3)
 // 
 // Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
 // processes them through Gemini AI with key pooling & rate limit handling,
@@ -120,47 +120,12 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var imageBuffer = Buffer.from(arrayBuffer);
   var base64Data = imageBuffer.toString("base64");
 
-  // ---- 1.5 Zero-Trust EXIF Pre-Check (Documents Only) ----
-  if (!isSelfie) {
-    // JPEG EXIF check: Look for EXIF marker (0xFFE1) in JPEG header
-    // Real camera photos contain EXIF metadata; pure screenshots/digital files typically don't
-    var hasExifMarker = false;
-    if (imageBuffer.length > 4 && imageBuffer[0] === 0xFF && imageBuffer[1] === 0xD8) {
-      // Valid JPEG start - scan for APP1 (EXIF) marker
-      for (var ei = 2; ei < Math.min(imageBuffer.length - 1, 65536); ei++) {
-        if (imageBuffer[ei] === 0xFF && imageBuffer[ei + 1] === 0xE1) {
-          hasExifMarker = true;
-          break;
-        }
-        // Skip past other markers
-        if (imageBuffer[ei] === 0xFF && imageBuffer[ei + 1] !== 0x00) {
-          if (ei + 3 < imageBuffer.length) {
-            var markerLen = (imageBuffer[ei + 2] << 8) | imageBuffer[ei + 3];
-            ei += markerLen + 1;
-          }
-        }
-      }
-    }
-    
-    if (!hasExifMarker) {
-      // No EXIF data found Ã¢â‚¬â€ likely a screenshot or digitally created image
-      if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
-      await supabase.from("upload_jobs").update({
-        status: "REJECTED",
-        error_code: "NO_EXIF_DATA",
-        reason: "Digital screenshots rejected. Real-world camera noise required.",
-        processed_at: new Date().toISOString()
-      }).eq("id", job.id);
-      return { jobId: job.id, result: "REJECTED", reason: "Digital screenshots rejected. Real-world camera noise required." };
-    }
-  }
-
   // ---- 2. AI Verification ----
   var specificTask = job.assigned_task || "Clear authentic human face looking at the camera";
 
   var qualityRules = isSelfie
     ? "You are a STRICT auditor. Is this a clear, authentic photograph of a real human face taken by a camera? You MUST reject AI-generated faces, cartoons, drawings, photos of screens, or masks. CRITICAL: You must also verify if the user explicitly complied with this specific directive: '" + specificTask + "'. If they failed this specific directive, or if the lighting/angle is wrong, set quality_pass to false and explain exactly why they failed the specific directive."
-    : "You are a STRINGENT data quality gatekeeper. You MUST reject this image if ANY of the following are true: (a) It is a screenshot or screen capture of any device. (b) It contains digital/typed/printed text from a computer, phone, or textbook. (c) It is a photo of a textbook, printed book page, or PDF document. (d) It is a random photo of an object, animal, scenery, or food that is NOT a document. (e) It is a blank or nearly blank page. (f) It contains human faces, selfies, or portrait photos. You may ONLY approve images that are authentic photographs of PHYSICAL, HANDWRITTEN notes written on real paper containing: " + (job.content_tags ? job.content_tags.join(", ") : "academic content") + ". The handwriting must be clearly visible and the content must be educational or informational. If rejecting, state the exact reason like 'Screenshot detected', 'Printed/digital text - not handwritten', 'Random photo - not a document', or 'Textbook page - not handwritten notes'.";
+    : "You are a STRINGENT data quality gatekeeper. You MUST reject this image if ANY of the following are true: (a) It is clearly a digital screenshot of a UI/website (allow low-quality physical photos). (b) It contains digital/typed/printed text from a computer, phone, or textbook. (c) It is a photo of a textbook, printed book page, or PDF document. (d) It is a random photo of an object, animal, scenery, or food that is NOT a document. (e) It is a blank or nearly blank page. (f) It contains human faces, selfies, or portrait photos. You may ONLY approve images that are authentic photographs of PHYSICAL, HANDWRITTEN notes written on real paper containing: " + (job.content_tags ? job.content_tags.join(", ") : "academic content") + ". The handwriting must be clearly visible and the content must be educational or informational. If rejecting, state the exact reason like 'Screenshot detected', 'Printed/digital text - not handwritten', 'Random photo - not a document', or 'Textbook page - not handwritten notes'.";
 
   var combinedPrompt;
   if (isSelfie) {
@@ -183,7 +148,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var response;
   try {
     response = await aiClient.models.generateContent({
-      model: "gemini-3.6-flash",
+      model: "gemini-1.5-flash",
       contents: [
         { text: combinedPrompt },
         { inlineData: { mimeType: "image/jpeg", data: base64Data } }
@@ -193,7 +158,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   } catch (aiErr) {
     var statusCode = aiErr.status || aiErr.statusCode || (aiErr.message && aiErr.message.indexOf("429") !== -1 ? 429 : 0);
     if (statusCode === 429 || statusCode === 503) {
-      // RATE LIMIT HIT Ã¢â‚¬â€ cooldown this key, mark job for retry
+      // RATE LIMIT HIT ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â cooldown this key, mark job for retry
       throw { isRateLimit: true, statusCode: statusCode, message: aiErr.message };
     }
     throw aiErr;
@@ -558,7 +523,7 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
 }
 
 // =====================================================================
-// POST /api/process-queue Ã¢â‚¬â€ The main queue processor endpoint
+// POST /api/process-queue ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â The main queue processor endpoint
 // Secured with x-admin-key header.
 // =====================================================================
 router.post("/", async (req, res) => {
@@ -582,7 +547,7 @@ router.post("/", async (req, res) => {
         calculateFinalTaskReward: xpEngine.calculateFinalTaskReward
       };
     } catch (xpLoadErr) {
-      console.warn("[QUEUE] xpengine.js not found Ã¢â‚¬â€ rewards will use base 48 SYNX without multipliers.");
+      console.warn("[QUEUE] xpengine.js not found ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â rewards will use base 48 SYNX without multipliers.");
     }
 
     // ---- 1. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
@@ -662,7 +627,7 @@ router.post("/", async (req, res) => {
           await supabase.from("upload_jobs").update({
             status: retryStatus,
             error_code: String(jobErr.statusCode),
-            reason: "Rate limited - key " + keyName + " on cooldown",
+            reason: "Queued — AI model is warming up, please wait...",
             retry_count: newRetryCount,
             assigned_key: null
           }).eq("id", job.id);
@@ -735,7 +700,7 @@ router.post("/", async (req, res) => {
 });
 
 // =====================================================================
-// GET /api/process-queue/key-status Ã¢â‚¬â€ View Gemini key pool status
+// GET /api/process-queue/key-status ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â View Gemini key pool status
 // Secured with x-admin-key header.
 // =====================================================================
 router.get("/key-status", async (req, res) => {
@@ -763,11 +728,3 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
-
-
-
-
-
-
-
-
