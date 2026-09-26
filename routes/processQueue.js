@@ -148,7 +148,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var response;
   try {
     response = await aiClient.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "models/gemini-1.5-flash-latest", // EXPLICIT PREFIX AND LATEST TAG
       contents: [
         { text: combinedPrompt },
         { inlineData: { mimeType: "image/jpeg", data: base64Data } }
