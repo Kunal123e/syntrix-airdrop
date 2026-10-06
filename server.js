@@ -14,17 +14,13 @@ const app = express();
 
 // ================= CORS & HEADERS =================
 app.use(cors({
+  // STAGING MODE: Dynamically reflect any origin to satisfy credentials: true without blocking Vercel preview URLs
   origin: function (origin, callback) {
-    // Allow all Vercel subdomains, localhost, and empty origins (like Postman)
-    if (!origin || origin.includes("vercel.app") || origin.includes("localhost") || origin.includes("127.0.0.1")) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
+    callback(null, origin || true);
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key", "Origin", "X-Requested-With", "x-admin-key", "Access-Control-Allow-Origin"]
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+  allowedHeaders: ["Content-Type", "Authorization", "accept", "api-key", "Origin", "X-Requested-With", "x-admin-key", "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials"]
 }));
 
 // STRICT RULE APPLIED: Limit boosted to 50mb to completely prevent WAF drops
@@ -116,7 +112,7 @@ async function sendEmailHTTP(toEmail, subject, htmlContent) {
       "content-type": "application/json"
     },
     body: JSON.stringify({
-      sender: { name: SENDER_NAME, email: "syntrix.care@gmail.com" },
+      sender: { name: SENDER_NAME, email: "rangwanikrish5@gmail.com" },
       to: [{ email: toEmail }],
       subject: subject,
       htmlContent: htmlContent
@@ -891,7 +887,7 @@ setInterval(async () => {
         if (!adminKey) return;
         const PORT = process.env.PORT || 5000;
         
-        const fetchUrl = "http://127.0.0.1:" + PORT + "/api/process-queue";
+        const fetchUrl = "http://localhost:" + PORT + "/api/process-queue";
         const res = await fetch(fetchUrl, {
             method: "POST",
             headers: { "x-admin-key": adminKey }
@@ -902,7 +898,7 @@ setInterval(async () => {
             console.log("[QUEUE] Processed " + data.processed + " jobs successfully.");
         }
     } catch (e) {
-        // Silent catch
+        console.error("[WORKER ERROR] Background loop failed:", e.message);
     } finally {
         isWorkerActive = false;
     }
