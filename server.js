@@ -112,7 +112,7 @@ async function sendEmailHTTP(toEmail, subject, htmlContent) {
       "content-type": "application/json"
     },
     body: JSON.stringify({
-      sender: { name: SENDER_NAME, email: "rangwanikrish5@gmail.com" },
+      sender: { name: SENDER_NAME, email: "syntrix.care@gmail.com" },
       to: [{ email: toEmail }],
       subject: subject,
       htmlContent: htmlContent
@@ -122,7 +122,7 @@ async function sendEmailHTTP(toEmail, subject, htmlContent) {
   if (!response.ok) {
     const errorData = await response.text();
     console.error("Brevo API Error:", errorData);
-    throw new Error("Email delivery failed via HTTP API");
+    throw new Error(`Brevo Error: ${errorData}`);
   }
   return await response.json();
 }
@@ -318,7 +318,7 @@ app.post("/api/send-invite", async (req, res) => {
     await sendEmailHTTP(friendEmail, "Join Syntrix and earn token rewards!", htmlBody);
     return res.json({ success: true });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message }); // FIX: Passes the exact Brevo error to the frontend UI
   }
 });
 
@@ -546,7 +546,7 @@ app.get("/api/user-status", async (req, res) => {
     });
 
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message }); // FIX: Passes the exact Brevo error to the frontend UI
   }
 });
 
@@ -751,7 +751,7 @@ function addUniqueThreadGuard() {
 
 // ================= UI POLLING ENDPOINT =================
 app.get("/api/check-submission", async (req, res) => {
-  const { email } = req.query;
+  const email = req.query.email || req.body?.email || req.query.userEmail;
   if (!email) return res.status(400).json({ error: "Email required" });
 
   try {
@@ -766,7 +766,7 @@ app.get("/api/check-submission", async (req, res) => {
     if (error) return res.status(500).json({ error: error.message });
     return res.json({ success: true, submission: data });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message }); // FIX: Passes the exact Brevo error to the frontend UI
   }
 });
 
@@ -941,7 +941,7 @@ app.get("/api/xp-profile", async (req, res) => {
     const profile = await getXPProfile(supabase, email);
     return res.json({ success: true, profile });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message }); // FIX: Passes the exact Brevo error to the frontend UI
   }
 });
 
@@ -1151,6 +1151,8 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+
+
 
 
 
