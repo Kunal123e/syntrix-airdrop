@@ -1,5 +1,5 @@
 // =====================================================================
-// POST /api/process-queue ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Serverless Queue Processor (Phase 3)
+// POST /api/process-queue ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Serverless Queue Processor (Phase 3)
 // 
 // Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
 // processes them through Gemini AI with key pooling & rate limit handling,
@@ -30,6 +30,14 @@ const DOC_KEYS = [
   process.env.GEMINI_DOCUMENT_KEY_4,
   process.env.GEMINI_API_KEY
 ].filter(Boolean);
+
+// Staging Fallback: If document keys are missing, route tasks to GEMINI_API_KEY or selfie key
+if (DOC_KEYS.length === 0 && process.env.GEMINI_API_KEY) {
+  DOC_KEYS.push(process.env.GEMINI_API_KEY);
+}
+if (SELFIE_KEYS.length === 0 && process.env.GEMINI_API_KEY) {
+  SELFIE_KEYS.push(process.env.GEMINI_API_KEY);
+}
 
 let selfieIndex = 0;
 let docIndex = 0;
@@ -158,7 +166,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   } catch (aiErr) {
     var statusCode = aiErr.status || aiErr.statusCode || (aiErr.message && aiErr.message.indexOf("429") !== -1 ? 429 : 0);
     if (statusCode === 429 || statusCode === 503) {
-      // RATE LIMIT HIT ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â cooldown this key, mark job for retry
+      // RATE LIMIT HIT ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â cooldown this key, mark job for retry
       throw { isRateLimit: true, statusCode: statusCode, message: aiErr.message };
     }
     throw aiErr;
@@ -508,12 +516,13 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
     batchBeforeUpdate.status !== "FAILED"
   ) {
     if (sendEmailHTTP && userEmail) {
+      const dashboardUrl = process.env.FRONTEND_URL || "https://syntrix-frontend-servey-2hl7.vercel.app";
       const emailHtml = `
         <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #000; color: #fff;">
           <h2 style="color: #10b981;">Syntrix AI Batch Complete</h2>
           <p style="color: #a1a1aa;">Your recent document upload batch has finished processing.</p>
           <p style="margin-bottom: 30px;">Log in to your Dashboard and check the <strong>Upload History</strong> tab to see your results, review any rejected files, and claim your SYNX tokens!</p>
-          <a href="https://syntrix-frontend-servey-2hl7.vercel.app" style="background-color: #10b981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold;">Go to Dashboard</a>
+          <a href="${dashboardUrl}" style="background-color: #10b981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold;">Go to Dashboard</a>
         </div>
       `;
       sendEmailHTTP(userEmail, "Syntrix AI Batch Processing Complete!", emailHtml)
@@ -523,7 +532,7 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
 }
 
 // =====================================================================
-// POST /api/process-queue ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â The main queue processor endpoint
+// POST /api/process-queue ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â The main queue processor endpoint
 // Secured with x-admin-key header.
 // =====================================================================
 router.post("/", async (req, res) => {
@@ -547,7 +556,7 @@ router.post("/", async (req, res) => {
         calculateFinalTaskReward: xpEngine.calculateFinalTaskReward
       };
     } catch (xpLoadErr) {
-      console.warn("[QUEUE] xpengine.js not found ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â rewards will use base 48 SYNX without multipliers.");
+      console.warn("[QUEUE] xpengine.js not found ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â rewards will use base 48 SYNX without multipliers.");
     }
 
     // ---- 1. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
@@ -621,13 +630,15 @@ router.post("/", async (req, res) => {
           console.warn("[QUEUE] Rate limit hit on " + keyName + " (HTTP " + jobErr.statusCode + "). Cooling down.");
           await markKeyCooldown(supabase, keyName);
 
-          var newRetryCount = (job.retry_count || 0) + 1;
-          var retryStatus = newRetryCount >= (job.max_retries || 3) ? "FAILED" : "RETRYING";
+                    var newRetryCount = (job.retry_count || 0) + 1;
+          var isFinalFailure = newRetryCount >= (job.max_retries || 15);
+          var retryStatus = isFinalFailure ? "FAILED" : "RETRYING";
+          var finalReason = isFinalFailure ? "AI Systems currently overloaded. Please try again later." : "Queued — AI model is warming up, please wait...";
 
           await supabase.from("upload_jobs").update({
             status: retryStatus,
             error_code: String(jobErr.statusCode),
-            reason: "Queued — AI model is warming up, please wait...",
+            reason: finalReason,
             retry_count: newRetryCount,
             assigned_key: null
           }).eq("id", job.id);
@@ -700,7 +711,7 @@ router.post("/", async (req, res) => {
 });
 
 // =====================================================================
-// GET /api/process-queue/key-status ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â View Gemini key pool status
+// GET /api/process-queue/key-status ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â View Gemini key pool status
 // Secured with x-admin-key header.
 // =====================================================================
 router.get("/key-status", async (req, res) => {
@@ -728,6 +739,7 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
 
 
 
