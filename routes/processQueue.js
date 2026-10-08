@@ -1,5 +1,5 @@
 // =====================================================================
-// POST /api/process-queue ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Serverless Queue Processor (Phase 3)
+// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â Serverless Queue Processor (Phase 3)
 // 
 // Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
 // processes them through Gemini AI with key pooling & rate limit handling,
@@ -156,7 +156,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var response;
   try {
     response = await aiClient.models.generateContent({
-      model: "gemini-3.6-flash",
+      model: "gemini-1.5-flash",
       contents: [
         { text: combinedPrompt },
         { inlineData: { mimeType: "image/jpeg", data: base64Data } }
@@ -166,7 +166,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   } catch (aiErr) {
     var statusCode = aiErr.status || aiErr.statusCode || (aiErr.message && aiErr.message.indexOf("429") !== -1 ? 429 : 0);
     if (statusCode === 429 || statusCode === 503) {
-      // RATE LIMIT HIT ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â cooldown this key, mark job for retry
+      // RATE LIMIT HIT ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â cooldown this key, mark job for retry
       throw { isRateLimit: true, statusCode: statusCode, message: aiErr.message };
     }
     throw aiErr;
@@ -532,7 +532,7 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
 }
 
 // =====================================================================
-// POST /api/process-queue ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â The main queue processor endpoint
+// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â The main queue processor endpoint
 // Secured with x-admin-key header.
 // =====================================================================
 router.post("/", async (req, res) => {
@@ -556,7 +556,7 @@ router.post("/", async (req, res) => {
         calculateFinalTaskReward: xpEngine.calculateFinalTaskReward
       };
     } catch (xpLoadErr) {
-      console.warn("[QUEUE] xpengine.js not found ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â rewards will use base 48 SYNX without multipliers.");
+      console.warn("[QUEUE] xpengine.js not found ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â rewards will use base 48 SYNX without multipliers.");
     }
 
     // ---- 1. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
@@ -627,13 +627,13 @@ router.post("/", async (req, res) => {
       } catch (jobErr) {
         if (jobErr.isRateLimit) {
           // ---- RATE LIMIT: Cooldown key, mark job for retry, STOP processing ----
-          console.warn("[QUEUE] Rate limit hit on " + keyName + " (HTTP " + jobErr.statusCode + "). Cooling down.");
+          console.warn("[QUEUE] API returned HTTP " + jobErr.statusCode + ". Rotating to next available key.");
           await markKeyCooldown(supabase, keyName);
 
                     var newRetryCount = (job.retry_count || 0) + 1;
-          var isFinalFailure = newRetryCount >= (job.max_retries || 15);
+          var isFinalFailure = newRetryCount >= 60; // Force 60, ignore database default
           var retryStatus = isFinalFailure ? "FAILED" : "RETRYING";
-          var finalReason = isFinalFailure ? "AI Systems currently overloaded. Please try again later." : "Queued — AI model is warming up, please wait...";
+          var finalReason = isFinalFailure ? "AI Systems currently overloaded. Please try again later." : "Queued â€” AI model is warming up, please wait...";
 
           await supabase.from("upload_jobs").update({
             status: retryStatus,
@@ -658,7 +658,7 @@ router.post("/", async (req, res) => {
           var isFatal = jobErr.isKeyError || false; // Don't retry if we literally don't have a key mapped
           
           var newRetryCount = (job.retry_count || 0) + 1;
-          var maxRetries = job.max_retries || 3;
+          var maxRetries = 60; // Force 60, ignore database default
           
           if (newRetryCount >= maxRetries || isFatal) {
               // Final failure
@@ -711,7 +711,7 @@ router.post("/", async (req, res) => {
 });
 
 // =====================================================================
-// GET /api/process-queue/key-status ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â View Gemini key pool status
+// GET /api/process-queue/key-status ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â View Gemini key pool status
 // Secured with x-admin-key header.
 // =====================================================================
 router.get("/key-status", async (req, res) => {
@@ -739,6 +739,9 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
+
+
 
 
 
