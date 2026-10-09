@@ -1,7 +1,5 @@
-these is processquue.js give the info that these is fix o not ?
-
 // =====================================================================
-// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Serverless Queue Processor (Phase 3)
+// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Serverless Queue Processor (Phase 3)
 // 
 // Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
 // processes them through Gemini AI with key pooling & rate limit handling,
@@ -177,7 +175,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   } catch (aiErr) {
     var statusCode = aiErr.status || aiErr.statusCode || (aiErr.message && aiErr.message.indexOf("429") !== -1 ? 429 : 0);
     if (statusCode === 429 || statusCode === 503) {
-      // RATE LIMIT HIT ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â cooldown this key, mark job for retry
+      // RATE LIMIT HIT - cooldown this key, mark job for retry
       throw { isRateLimit: true, statusCode: statusCode, message: aiErr.message };
     }
     throw aiErr;
@@ -543,7 +541,7 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
 }
 
 // =====================================================================
-// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â The main queue processor endpoint
+// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â The main queue processor endpoint
 // Secured with x-admin-key header.
 // =====================================================================
 router.post("/", async (req, res) => {
@@ -567,7 +565,7 @@ router.post("/", async (req, res) => {
         calculateFinalTaskReward: xpEngine.calculateFinalTaskReward
       };
     } catch (xpLoadErr) {
-      console.warn("[QUEUE] xpengine.js not found ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â rewards will use base 48 SYNX without multipliers.");
+      console.warn("[QUEUE] xpengine.js not found - rewards will use base 48 SYNX without multipliers.");
     }
 
     // ---- 1. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
@@ -644,7 +642,7 @@ router.post("/", async (req, res) => {
                     var newRetryCount = (job.retry_count || 0) + 1;
           var isFinalFailure = newRetryCount >= 60; // Force 60, ignore database default
           var retryStatus = isFinalFailure ? "FAILED" : "RETRYING";
-          var finalReason = isFinalFailure ? "AI Systems currently overloaded. Please try again later." : "Queued Ã¢â‚¬â€ AI model is warming up, please wait...";
+          var finalReason = isFinalFailure ? "AI Systems currently overloaded. Please try again later." : "Queued - AI model is warming up, please wait...";
 
           await supabase.from("upload_jobs").update({
             status: retryStatus,
@@ -722,7 +720,7 @@ router.post("/", async (req, res) => {
 });
 
 // =====================================================================
-// GET /api/process-queue/key-status ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â View Gemini key pool status
+// GET /api/process-queue/key-status - View Gemini key pool status
 // Secured with x-admin-key header.
 // =====================================================================
 router.get("/key-status", async (req, res) => {
@@ -750,3 +748,18 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
