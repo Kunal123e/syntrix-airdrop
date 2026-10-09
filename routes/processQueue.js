@@ -147,6 +147,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
       "The user was assigned a specific, randomized physical task to prove liveness.\n" +
       "ASSIGNED TASK: '" + specificTask + "'\n\n" +
       "- You MUST evaluate the image based strictly on this assigned task.\n" +
+      "- CRITICAL ORIENTATION RULE: Evaluate 'left' and 'right' from the USER'S physical perspective! In an unmirrored photo, if a user turns to THEIR left, their nose points toward the RIGHT side of the image from your perspective.\n" +
       "- The Assigned Task OVERRIDES standard front-facing selfie rules. If they perfectly match the assigned task, verify them.\n\n" +
       "### OUTPUT FORMAT\n" +
       "Respond ONLY with raw JSON in this exact format:\n" +
@@ -748,6 +749,7 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
 
 
 
