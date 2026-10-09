@@ -1,5 +1,7 @@
+these is processquue.js give the info that these is fix o not ?
+
 // =====================================================================
-// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â Serverless Queue Processor (Phase 3)
+// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Serverless Queue Processor (Phase 3)
 // 
 // Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
 // processes them through Gemini AI with key pooling & rate limit handling,
@@ -137,11 +139,20 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
 
   var combinedPrompt;
   if (isSelfie) {
-    combinedPrompt = "You are an extremely strict security AI validator for a data quality platform. Your job is to PROTECT the dataset from low-quality or fraudulent submissions. When in doubt, REJECT. Evaluate this image for:\n" +
-      "1. QUALITY: " + qualityRules + "\n" +
-      "2. PII: Does this image contain Sensitive Personal Identifiable Information (phone numbers, home addresses, government IDs like Aadhaar/SSN, bank account numbers, or passwords)?\n" +
-      "3. VISUAL SIGNATURE: Generate a compact descriptor of the person's appearance. Include hairstyle, clothing color/type, facial hair status, background environment, and lighting. Example: 'short_hair_blue_tshirt_clean_shaven_white_wall_natural_light'. This is used to prevent duplicate dataset entries.\n" +
-      'You MUST respond STRICTLY with JSON: {"quality_pass": true_or_false, "contains_pii": true_or_false, "visual_signature": "compact_descriptor_string", "reason": "Concise specific reason for your decision"}';
+    combinedPrompt = "You are an elite, highly strict Liveness & KYC Verification AI for the Syntrix Network.\n" +
+      "Analyze the attached image and return ONLY a valid JSON object.\n\n" +
+      "### RULE 1: CLARITY & LIGHTING (Baseline)\n" +
+      "- There must be exactly one human face visible.\n" +
+      "- The face must NOT be severely underexposed, heavily shadowed, or heavily blurred.\n" +
+      "- If the lighting fails, reject it.\n\n" +
+      "### RULE 2: DYNAMIC TASK EMBEDDING (Critical)\n" +
+      "The user was assigned a specific, randomized physical task to prove liveness.\n" +
+      "ASSIGNED TASK: '" + specificTask + "'\n\n" +
+      "- You MUST evaluate the image based strictly on this assigned task.\n" +
+      "- The Assigned Task OVERRIDES standard front-facing selfie rules. If they perfectly match the assigned task, verify them.\n\n" +
+      "### OUTPUT FORMAT\n" +
+      "Respond ONLY with raw JSON in this exact format:\n" +
+      '{"quality_pass": true_or_false, "contains_pii": false, "reason": "1-sentence reason for rejection, or \'Verified\' if passed"}';
   } else {
     combinedPrompt = "Evaluate this document and return a JSON object with 'quality_pass', 'category_tier', 'quality_score', and 'contains_pii'. " +
       "If 'contains_pii' is true (SSN, credit cards, sensitive IDs, Aadhaar numbers, bank account numbers, passwords), immediately flag for purging: set quality_pass to false and yield quality_score 0. " +
@@ -166,7 +177,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   } catch (aiErr) {
     var statusCode = aiErr.status || aiErr.statusCode || (aiErr.message && aiErr.message.indexOf("429") !== -1 ? 429 : 0);
     if (statusCode === 429 || statusCode === 503) {
-      // RATE LIMIT HIT ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â cooldown this key, mark job for retry
+      // RATE LIMIT HIT ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â cooldown this key, mark job for retry
       throw { isRateLimit: true, statusCode: statusCode, message: aiErr.message };
     }
     throw aiErr;
@@ -532,7 +543,7 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
 }
 
 // =====================================================================
-// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â The main queue processor endpoint
+// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â The main queue processor endpoint
 // Secured with x-admin-key header.
 // =====================================================================
 router.post("/", async (req, res) => {
@@ -556,7 +567,7 @@ router.post("/", async (req, res) => {
         calculateFinalTaskReward: xpEngine.calculateFinalTaskReward
       };
     } catch (xpLoadErr) {
-      console.warn("[QUEUE] xpengine.js not found ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â rewards will use base 48 SYNX without multipliers.");
+      console.warn("[QUEUE] xpengine.js not found ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â rewards will use base 48 SYNX without multipliers.");
     }
 
     // ---- 1. Fetch queued jobs (Phase 2: Workload Separation & Fallback) ----
@@ -633,7 +644,7 @@ router.post("/", async (req, res) => {
                     var newRetryCount = (job.retry_count || 0) + 1;
           var isFinalFailure = newRetryCount >= 60; // Force 60, ignore database default
           var retryStatus = isFinalFailure ? "FAILED" : "RETRYING";
-          var finalReason = isFinalFailure ? "AI Systems currently overloaded. Please try again later." : "Queued â€” AI model is warming up, please wait...";
+          var finalReason = isFinalFailure ? "AI Systems currently overloaded. Please try again later." : "Queued Ã¢â‚¬â€ AI model is warming up, please wait...";
 
           await supabase.from("upload_jobs").update({
             status: retryStatus,
@@ -711,7 +722,7 @@ router.post("/", async (req, res) => {
 });
 
 // =====================================================================
-// GET /api/process-queue/key-status ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â View Gemini key pool status
+// GET /api/process-queue/key-status ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â View Gemini key pool status
 // Secured with x-admin-key header.
 // =====================================================================
 router.get("/key-status", async (req, res) => {
@@ -739,16 +750,3 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
-
-
-
-
-
-
-
-
-
-
-
-
-
