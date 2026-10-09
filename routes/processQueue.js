@@ -642,7 +642,7 @@ router.post("/", async (req, res) => {
                     var newRetryCount = (job.retry_count || 0) + 1;
           var isFinalFailure = newRetryCount >= 60; // Force 60, ignore database default
           var retryStatus = isFinalFailure ? "FAILED" : "RETRYING";
-          var finalReason = isFinalFailure ? "AI Systems currently overloaded. Please try again later." : "Queued - AI model is warming up, please wait...";
+          var finalReason = isFinalFailure ? "Analysis timed out. Please check your network and submit again." : "Queued for processing. A secure verification node is being allocated to analyze your submission.";
 
           await supabase.from("upload_jobs").update({
             status: retryStatus,
@@ -748,6 +748,7 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
 
 
 
