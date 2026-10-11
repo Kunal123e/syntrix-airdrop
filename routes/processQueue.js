@@ -65,10 +65,21 @@ function resolveKeyValue(keyName) { return keyName; }
 // =====================================================================
 function getBucketPathFromUrl(url) {
   if (!url) return null;
-  var marker = "/storage/v1/object/public/verified_assets/";
+  var marker = "/verified_assets/";
   var idx = url.indexOf(marker);
-  if (idx === -1) return null;
-  return url.substring(idx + marker.length);
+  if (idx === -1) {
+    marker = "/storage/v1/object/public/verified_assets/";
+    idx = url.indexOf(marker);
+    if (idx === -1) return null;
+  }
+  var path = url.substring(idx + marker.length);
+  var qIdx = path.indexOf("?");
+  if (qIdx !== -1) path = path.substring(0, qIdx);
+  try {
+    return decodeURIComponent(path);
+  } catch (e) {
+    return path;
+  }
 }
 
 // =====================================================================
@@ -120,12 +131,47 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   }
 
   // ---- 1. Fetch image from storage ----
-  var imageResponse = await fetch(job.storage_url);
-  if (!imageResponse.ok) {
-    throw new Error("Failed to fetch image from storage: HTTP " + imageResponse.status);
+  // ---- 1. Fetch image from storage (Dual Strategy: Authenticated SDK download + fallback HTTP fetch) ----
+  var imageBuffer = null;
+
+  // Strategy A: Direct authenticated download via Supabase Service Role SDK (bypasses HTTP 400)
+  if (relativeFilePath) {
+    try {
+      var { data: downloadedBlob, error: downloadErr } = await supabase.storage
+        .from("verified_assets")
+        .download(relativeFilePath);
+      if (!downloadErr && downloadedBlob) {
+        var arrayBuf = await downloadedBlob.arrayBuffer();
+        imageBuffer = Buffer.from(arrayBuf);
+      } else if (downloadErr) {
+        console.warn("[QUEUE] Supabase SDK download error for " + relativeFilePath + ":", downloadErr.message);
+      }
+    } catch (sdkErr) {
+      console.warn("[QUEUE] Supabase SDK download exception:", sdkErr.message);
+    }
   }
-  var arrayBuffer = await imageResponse.arrayBuffer();
-  var imageBuffer = Buffer.from(arrayBuffer);
+
+  // Strategy B: Fallback HTTP Fetch with browser headers and URI encoding
+  if (!imageBuffer) {
+    try {
+      var safeUrl = encodeURI(decodeURI(job.storage_url));
+      var imageResponse = await fetch(safeUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "image/*,*/*;q=0.8"
+        }
+      });
+      if (imageResponse.ok) {
+        var arrayBuffer = await imageResponse.arrayBuffer();
+        imageBuffer = Buffer.from(arrayBuffer);
+      } else {
+        throw new Error("HTTP " + imageResponse.status);
+      }
+    } catch (httpErr) {
+      throw new Error("Failed to fetch image from storage: " + httpErr.message);
+    }
+  }
+
   var base64Data = imageBuffer.toString("base64");
 
     // ---- 2. AI Verification ----
@@ -148,19 +194,22 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
 
   var combinedPrompt;
   if (isSelfie) {
-    combinedPrompt = "You are an elite, highly strict Liveness & KYC Verification AI for the Syntrix Network.\n" +
+    var hasSpecificTask = job.assigned_task && job.assigned_task.trim().length > 0;
+    var taskDirective = hasSpecificTask
+      ? "ASSIGNED TASK: '" + job.assigned_task + "'\n" +
+        "- You MUST evaluate if the user made an honest, visible attempt to match this assigned task.\n" +
+        "- ORIENTATION RULE: Evaluate 'left' and 'right' from the USER'S physical perspective (in an unmirrored photo, turning to their left points their face to the right side of the image).\n" +
+        "- LENIENCY & TOLERANCE: Real users have natural head angle variations. If the user made an honest attempt to match the assigned pose (e.g. turning their head roughly in that direction, looking up, or smiling), you MUST APPROVE them with quality_pass: true! Do NOT fail users for slight angle deviations."
+      : "STANDARD LIVENESS: Verify that this is a real, authentic human face (not a screen, mask, or cartoon). The user may look forward or turned naturally at any angle. APPROVE ANY authentic human selfie with quality_pass: true!";
+
+    combinedPrompt = "You are an elite Liveness & KYC Verification AI for the Syntrix Network.\n" +
       "Analyze the attached image and return ONLY a valid JSON object.\n\n" +
       "### RULE 1: CLARITY & LIGHTING (Baseline)\n" +
       "- There must be exactly one human face visible.\n" +
-      "- The face must NOT be severely underexposed, heavily shadowed, or heavily blurred.\n" +
-      "- If the lighting fails, reject it.\n\n" +
-      "### RULE 2: DYNAMIC TASK EMBEDDING (Critical)\n" +
-      "The user was assigned a specific, randomized physical task to prove liveness.\n" +
-      "ASSIGNED TASK: '" + specificTask + "'\n\n" +
-      "- You MUST evaluate the image based strictly on this assigned task.\n" +
-      "- CRITICAL ORIENTATION RULE: Evaluate 'left' and 'right' from the USER'S physical perspective! In an unmirrored photo, if a user turns to THEIR left, their nose points toward the RIGHT side of the image from your perspective.\n" +
-      "- The Assigned Task OVERRIDES standard front-facing selfie rules. If they attempt the assigned task, verify them.\n" +
-      "- LENIENCY & TOLERANCE: Real users have slight natural head angle variations. If the user made an honest, visible attempt to match the assigned pose (e.g. turning their head in the requested direction, looking up, or smiling), you MUST APPROVE them with quality_pass: true! Do NOT fail users for slight angle deviations.\n\n" +
+      "- The face must NOT be pitch black, completely dark silhouette, or heavily distorted.\n" +
+      "- If the face is clearly recognizable, PASS RULE 1.\n\n" +
+      "### RULE 2: LIVENESS & POSE COMPLIANCE\n" +
+      taskDirective + "\n\n" +
       "### OUTPUT FORMAT\n" +
       "Respond ONLY with raw JSON in this exact format:\n" +
       '{"quality_pass": true_or_false, "contains_pii": false, "reason": "1-sentence reason for rejection, or \'Verified\' if passed"}';
@@ -761,20 +810,3 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
