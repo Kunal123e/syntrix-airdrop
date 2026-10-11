@@ -787,7 +787,15 @@ app.post("/api/upload-task", async (req, res) => {
   }
 
   const sanitizedEmail = actualEmail.trim().toLowerCase();
-  const safeFileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+  const lastDot = fileName.lastIndexOf(".");
+      let safeFileName;
+      if (lastDot !== -1) {
+        const namePart = fileName.substring(0, lastDot).replace(/[^a-zA-Z0-9\-_]/g, "_");
+        const extPart = fileName.substring(lastDot + 1).replace(/[^a-zA-Z0-9]/g, "");
+        safeFileName = namePart + "." + extPart;
+      } else {
+        safeFileName = fileName.replace(/[^a-zA-Z0-9\-_]/g, "_") + ".jpeg";
+      }
 
   // STRICT 24-HOUR LIMITER FOR SELFIES (Testing Mode)
   if (taskType === 'selfie') {
