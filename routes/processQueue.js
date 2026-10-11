@@ -128,8 +128,19 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   var imageBuffer = Buffer.from(arrayBuffer);
   var base64Data = imageBuffer.toString("base64");
 
-  // ---- 2. AI Verification ----
-  var specificTask = job.assigned_task || "Clear authentic human face looking at the camera";
+    // ---- 2. AI Verification ----
+  if (isSelfie && !job.assigned_task) {
+    try {
+      var { data: taskRow } = await supabase.from("upload_jobs").select("assigned_task").eq("id", job.id).single();
+      if (taskRow && taskRow.assigned_task) {
+        job.assigned_task = taskRow.assigned_task;
+      }
+    } catch (e) {
+      console.warn("[QUEUE] Could not fetch assigned_task for job " + job.id, e.message);
+    }
+  }
+
+  var specificTask = job.assigned_task || "Clear authentic human face looking naturally at or toward the camera";
 
   var qualityRules = isSelfie
     ? "You are a STRICT auditor. Is this a clear, authentic photograph of a real human face taken by a camera? You MUST reject AI-generated faces, cartoons, drawings, photos of screens, or masks. CRITICAL: You must also verify if the user explicitly complied with this specific directive: '" + specificTask + "'. If they failed this specific directive, or if the lighting/angle is wrong, set quality_pass to false and explain exactly why they failed the specific directive."
@@ -148,7 +159,8 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
       "ASSIGNED TASK: '" + specificTask + "'\n\n" +
       "- You MUST evaluate the image based strictly on this assigned task.\n" +
       "- CRITICAL ORIENTATION RULE: Evaluate 'left' and 'right' from the USER'S physical perspective! In an unmirrored photo, if a user turns to THEIR left, their nose points toward the RIGHT side of the image from your perspective.\n" +
-      "- The Assigned Task OVERRIDES standard front-facing selfie rules. If they perfectly match the assigned task, verify them.\n\n" +
+      "- The Assigned Task OVERRIDES standard front-facing selfie rules. If they attempt the assigned task, verify them.\n" +
+      "- LENIENCY & TOLERANCE: Real users have slight natural head angle variations. If the user made an honest, visible attempt to match the assigned pose (e.g. turning their head in the requested direction, looking up, or smiling), you MUST APPROVE them with quality_pass: true! Do NOT fail users for slight angle deviations.\n\n" +
       "### OUTPUT FORMAT\n" +
       "Respond ONLY with raw JSON in this exact format:\n" +
       '{"quality_pass": true_or_false, "contains_pii": false, "reason": "1-sentence reason for rejection, or \'Verified\' if passed"}';
@@ -579,7 +591,7 @@ router.post("/", async (req, res) => {
         if (fetchErr) console.warn("[QUEUE] RPC get_fair_queued_jobs failed/missing. Using fallback queries...");
         
         // Fallback: Fetch max 3 Documents and max 2 Selfies to separate workloads
-        var columns = "id, status, user_email, task_type, storage_url, file_name, file_hash, retry_count, max_retries, batch_id, content_tags";
+        var columns = "id, status, user_email, task_type, storage_url, file_name, file_hash, retry_count, max_retries, batch_id, content_tags, assigned_task";
         
         var { data: docJobs } = await supabase
             .from("upload_jobs")
