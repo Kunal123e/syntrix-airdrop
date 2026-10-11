@@ -1,35 +1,48 @@
+// =====================================================================
+// POST /api/uploads/batch — Fast-Return Batch Upload Endpoint
+// Accepts multiple files, deduplicates by SHA-256, saves to Supabase
+// storage, creates batch + job rows, and returns IMMEDIATELY.
+// =====================================================================
+
 const express = require("express");
 const crypto = require("crypto");
 const router = express.Router();
 
+/**
+ * Requires `supabase` client to be attached to `req.app.locals.supabase`
+ * in server.js before mounting this router.
+ */
+
+// POST /api/uploads/batch
 router.post("/", async (req, res) => {
   try {
     const supabase = req.app.locals.supabase;
     const { userEmail, files } = req.body;
 
+    // ---- Input Validation ----
     if (!userEmail || !files || !Array.isArray(files) || files.length === 0) {
       return res.status(400).json({
         success: false,
         error: "Missing required fields: userEmail (string), files (array of {taskType, fileName, imageBase64})"
       });
     }
-    
+
     if (files.length > 5) {
       return res.status(400).json({
         success: false,
         error: "Maximum 5 files per batch."
       });
     }
-    
+
     const sanitizedEmail = userEmail.trim().toLowerCase();
     const jobResults = [];
     const validJobs = [];
-    
-    // STRICT FOR LOOP: Ensures 'await' works correctly
+
+    // ---- Process Each File ----
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const { taskType, fileName, imageBase64, contentTags } = file;
-    
+      const { taskType, fileName, imageBase64, contentTags, assignedTask, assigned_task } = file;
+
       if (!taskType || !fileName || !imageBase64) {
         jobResults.push({
           index: i,
@@ -40,7 +53,8 @@ router.post("/", async (req, res) => {
         });
         continue;
       }
-    
+
+      // ---- Decode Base64 to Buffer ----
       let buffer;
       try {
         const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
@@ -55,7 +69,7 @@ router.post("/", async (req, res) => {
         });
         continue;
       }
-    
+
       if (buffer.length < 1024) {
         jobResults.push({
           index: i,
@@ -66,55 +80,66 @@ router.post("/", async (req, res) => {
         });
         continue;
       }
-    
+
+      // ---- SHA-256 Hash ----
       const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
-    
-      // AWAIT NOW WORKS BECAUSE IT IS INSIDE router.post("/", async ...)
+
+      // ---- Duplicate Detection: Check upload_jobs for existing hash ----
       const { data: existingHash, error: hashCheckErr } = await supabase
         .from("upload_jobs")
         .select("id, status, user_email")
         .eq("file_hash", fileHash)
         .in("status", ["QUEUED", "PROCESSING", "VERIFIED"])
         .limit(1);
-    
+
       if (!hashCheckErr && existingHash && existingHash.length > 0) {
         jobResults.push({
           index: i,
           fileName: fileName,
           status: "REJECTED",
           error_code: "DUPLICATE_HASH",
-          reason: "Duplicate image detected (Hash Match)"
+          reason: "This exact file has already been submitted."
         });
         continue;
       }
-    
+
+      // ---- Also check the legacy syntrix_submissions table ----
       const { data: legacyDup, error: legacyErr } = await supabase
         .from("syntrix_submissions")
         .select("id")
         .eq("file_hash", fileHash)
         .limit(1);
-    
+
       if (!legacyErr && legacyDup && legacyDup.length > 0) {
         jobResults.push({
           index: i,
           fileName: fileName,
           status: "REJECTED",
           error_code: "DUPLICATE_HASH_LEGACY",
-          reason: "Duplicate image detected (Hash Match)"
+          reason: "This file was already submitted through the previous system."
         });
         continue;
       }
-    
-      const safeFileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+
+      // ---- Upload to Supabase Storage ----
+      const lastDot = fileName.lastIndexOf(".");
+      let safeFileName;
+      if (lastDot !== -1) {
+        const namePart = fileName.substring(0, lastDot).replace(/[^a-zA-Z0-9\-_]/g, "_");
+        const extPart = fileName.substring(lastDot + 1).replace(/[^a-zA-Z0-9]/g, "");
+        safeFileName = namePart + "." + extPart;
+      } else {
+        safeFileName = fileName.replace(/[^a-zA-Z0-9\-_]/g, "_") + ".jpeg";
+      }
       const storagePath = `queue/${sanitizedEmail}/${Date.now()}_${i}_${safeFileName}`;
-    
+
       const { error: uploadErr } = await supabase.storage
         .from("verified_assets")
         .upload(storagePath, buffer, {
           contentType: "image/jpeg",
           upsert: false
         });
-    
+
       if (uploadErr) {
         jobResults.push({
           index: i,
@@ -125,13 +150,15 @@ router.post("/", async (req, res) => {
         });
         continue;
       }
-    
+
+      // ---- Get Public URL ----
       const { data: publicUrlData } = supabase.storage
         .from("verified_assets")
         .getPublicUrl(storagePath);
-    
+
       const storageUrl = publicUrlData ? publicUrlData.publicUrl : null;
-    
+
+      // ---- Queue this job ----
       validJobs.push({
         user_email: sanitizedEmail,
         task_type: taskType,
@@ -139,12 +166,13 @@ router.post("/", async (req, res) => {
         storage_url: storageUrl,
         file_hash: fileHash,
         content_tags: Array.isArray(contentTags) && contentTags.length > 0 ? contentTags : ["none"],
+        assigned_task: assignedTask || assigned_task || file.assignedTask || null,
         status: "QUEUED",
         index: i
       });
     }
-    
-    // Front-end detailed rejection response
+
+    // ---- If no valid jobs, return early ----
     if (validJobs.length === 0) {
       const uniqueReasons = [...new Set(jobResults.map(j => j.reason))];
       const reasonsStr = uniqueReasons.join(" | ");
@@ -156,7 +184,8 @@ router.post("/", async (req, res) => {
         jobs: jobResults
       });
     }
-    
+
+    // ---- Create Batch Row ----
     const { data: batchData, error: batchErr } = await supabase
       .from("upload_batches")
       .insert([{
@@ -167,7 +196,7 @@ router.post("/", async (req, res) => {
       }])
       .select("id")
       .single();
-    
+
     if (batchErr || !batchData) {
       console.error("[BATCH] Failed to create batch row:", batchErr);
       return res.status(500).json({
@@ -175,10 +204,11 @@ router.post("/", async (req, res) => {
         error: "Failed to create upload batch record."
       });
     }
-    
+
     const batchId = batchData.id;
-    
-    const jobInserts = validJobs.map(job => {
+
+    // ---- Create Job Rows ----
+    const jobInserts = validJobs.map(function(job) {
       return {
         batch_id: batchId,
         user_email: job.user_email,
@@ -187,27 +217,30 @@ router.post("/", async (req, res) => {
         storage_url: job.storage_url,
         file_hash: job.file_hash,
         content_tags: job.content_tags,
+        assigned_task: job.assigned_task,
         status: "QUEUED"
       };
     });
-    
+
     const { data: insertedJobs, error: jobInsertErr } = await supabase
       .from("upload_jobs")
       .insert(jobInserts)
       .select("id, file_name, status");
-    
+
     if (jobInsertErr) {
       console.error("[BATCH] Failed to create job rows:", jobInsertErr);
+      // Roll back the batch
       await supabase.from("upload_batches").delete().eq("id", batchId);
       return res.status(500).json({
         success: false,
         error: "Failed to create upload job records."
       });
     }
-    
+
+    // ---- Merge results: rejected files + queued files ----
     const finalJobs = [
       ...jobResults,
-      ...insertedJobs.map((j, idx) => {
+      ...insertedJobs.map(function(j, idx) {
         return {
           id: j.id,
           fileName: j.file_name,
@@ -215,8 +248,9 @@ router.post("/", async (req, res) => {
           index: validJobs[idx].index
         };
       })
-    ].sort((a, b) => a.index - b.index);
-    
+    ].sort(function(a, b) { return a.index - b.index; });
+
+    // ---- FAST RETURN — No AI processing happens here ----
     return res.status(200).json({
       success: true,
       batchId: batchId,
@@ -228,8 +262,11 @@ router.post("/", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Batch Upload Error:", err);
-    return res.status(500).json({ success: false, error: "Internal server error" });
+    console.error("[BATCH] Unexpected error:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error during batch upload."
+    });
   }
 });
 
