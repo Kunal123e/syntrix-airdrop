@@ -1160,6 +1160,34 @@ app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
 
+// =====================================================================
+// QUEUE AUTO-POLLER (SAFE HEARTBEAT)
+// Automatically triggers the queue, but waits if a heavy batch is running
+// =====================================================================
+let isQueueRunning = false;
+
+setInterval(async () => {
+  // If the previous job is still running, skip this heartbeat to prevent overlapping timeouts
+  if (isQueueRunning) return; 
+  
+  const adminKey = process.env.ADMIN_SECRET_KEY;
+  const port = process.env.PORT || 5000;
+  
+  if (adminKey) {
+    isQueueRunning = true; // Lock the queue
+    try {
+      await fetch(`http://localhost:${port}/api/process-queue`, {
+        method: 'POST',
+        headers: { 'x-admin-key': adminKey }
+      });
+    } catch (err) {
+      // Silent catch to prevent console spam
+    } finally {
+      isQueueRunning = false; // Unlock the queue when finished
+    }
+  }
+}, 10000); // Checks every 10 seconds safely
+
 
 
 
