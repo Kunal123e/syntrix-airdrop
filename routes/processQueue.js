@@ -419,20 +419,30 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
     }
 
     var qualityScore = aiVerdict.quality_score || 0;
-    if (qualityScore < 70) {
-      // Sub-70 data is rejected to protect commercial packages
+    
+    // Only completely reject pure garbage or empty pages (< 40)
+    if (qualityScore < 40) {
       if (relativeFilePath) await supabase.storage.from("verified_assets").remove([relativeFilePath]);
       await supabase.from("upload_jobs").update({
         status: "REJECTED",
         error_code: "LOW_QUALITY_SCORE",
-        reason: "Quality score " + qualityScore + "/100 below minimum threshold (70). Tier " + (aiVerdict.category_tier || 3) + ".",
+        reason: "Content is too sparse or illegible. Quality score " + qualityScore + "/100.",
         processed_at: new Date().toISOString()
       }).eq("id", job.id);
-      return { jobId: job.id, result: "REJECTED", reason: "Quality score " + qualityScore + "/100 below threshold" };
+      return { jobId: job.id, result: "REJECTED", reason: "Quality score " + qualityScore + "/100 below absolute minimum" };
     }
 
-    rewardAmount = Math.floor((batchFileCount / 5) * 100 * (qualityScore / 100));
-    rewardAmount = Math.min(rewardAmount, batchFileCount * 20); // Hard cap: 20 SYNX per file
+    // Tiered Reward Logic based on OCR/Handwriting density
+    if (qualityScore >= 80) {
+      rewardAmount = 20; // Premium data
+    } else if (qualityScore >= 60) {
+      rewardAmount = 10; // Standard data
+    } else {
+      rewardAmount = 4;  // Low priority/sparse data, but still verified to allow daily progression
+    }
+    
+    // Scale by batch size
+    rewardAmount = rewardAmount * batchFileCount;
   }
 
   // Apply XP multiplier on top of the tier-based reward
