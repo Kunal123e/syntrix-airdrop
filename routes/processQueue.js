@@ -145,6 +145,11 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
         imageBuffer = Buffer.from(arrayBuf);
       } else if (downloadErr) {
         console.warn("[QUEUE] Supabase SDK download error for " + relativeFilePath + ":", downloadErr.message);
+        if (downloadErr.message && downloadErr.message.includes("Object not found")) {
+          var fatalErr = new Error("Failed to fetch image from storage: Object not found in bucket");
+          fatalErr.isFatal = true;
+          throw fatalErr;
+        }
       }
     } catch (sdkErr) {
       console.warn("[QUEUE] Supabase SDK download exception:", sdkErr.message);
@@ -165,10 +170,15 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
         var arrayBuffer = await imageResponse.arrayBuffer();
         imageBuffer = Buffer.from(arrayBuffer);
       } else {
-        throw new Error("HTTP " + imageResponse.status);
+        var err = new Error("Failed to fetch image from storage: HTTP " + imageResponse.status);
+        err.isFatal = (imageResponse.status === 400 || imageResponse.status === 404);
+        throw err;
       }
     } catch (httpErr) {
-      throw new Error("Failed to fetch image from storage: " + httpErr.message);
+      if (httpErr.isFatal) throw httpErr;
+      var err = new Error("Failed to fetch image from storage: " + httpErr.message);
+      err.isFatal = (httpErr.message && (httpErr.message.includes("400") || httpErr.message.includes("404")));
+      throw err;
     }
   }
 
@@ -726,7 +736,7 @@ router.post("/", async (req, res) => {
           console.error("[QUEUE] Job " + job.id + " failed:", jobErr.message);
 
           var filePath = getBucketPathFromUrl(job.storage_url);
-          var isFatal = jobErr.isKeyError || false; // Don't retry if we literally don't have a key mapped
+          var isFatal = jobErr.isKeyError || jobErr.isFatal || false; // Don't retry if missing key or missing file
           
           var newRetryCount = (job.retry_count || 0) + 1;
           var maxRetries = 60; // Force 60, ignore database default
@@ -810,3 +820,20 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
