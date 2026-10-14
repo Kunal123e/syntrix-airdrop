@@ -1,5 +1,5 @@
 // =====================================================================
-// POST /api/process-queue — Serverless Queue Processor (Phase 3)
+// POST /api/process-queue ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Serverless Queue Processor (Phase 3)
 // 
 // Fetches QUEUED/RETRYING upload_jobs using fair round-robin scheduling,
 // processes them through Gemini AI with key pooling & rate limit handling,
@@ -274,6 +274,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
     }
   }
 
+  // ---- 1. Fetch image from storage ----
   // ---- 1. Fetch image from storage (Dual Strategy: Authenticated SDK download + fallback HTTP fetch) ----
   var imageBuffer = null;
 
@@ -348,7 +349,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
 
   var base64Data = imageBuffer.toString("base64");
 
-  // ---- 2. AI Verification ----
+    // ---- 2. AI Verification ----
   if (isSelfie && !job.assigned_task) {
     try {
       var { data: taskRow } = await supabase.from("upload_jobs").select("assigned_task").eq("id", job.id).single();
@@ -1021,3 +1022,21 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
