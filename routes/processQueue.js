@@ -35,28 +35,20 @@ const APPROVED_KEY_ALIASES = new Set([
   "GEMINI_API_KEY"
 ]);
 
-const SELFIE_KEY_POOL = [
+const SELFIE_KEY_NAMES = [
   "GEMINI_API_SELFIE",
   "GEMINI_API_SELFIE_2",
   "GEMINI_API_SELFIE_3",
   "GEMINI_API_KEY"
-].filter(name => Boolean(process.env[name]));
+];
 
-const DOC_KEY_POOL = [
+const DOC_KEY_NAMES = [
   "GEMINI_DOCUMENT_KEY_1",
   "GEMINI_DOCUMENT_KEY_2",
   "GEMINI_DOCUMENT_KEY_3",
   "GEMINI_DOCUMENT_KEY_4",
   "GEMINI_API_KEY"
-].filter(name => Boolean(process.env[name]));
-
-// Staging Fallback: If document keys are missing, route tasks to GEMINI_API_KEY or selfie key
-if (DOC_KEY_POOL.length === 0 && process.env.GEMINI_API_KEY) {
-  DOC_KEY_POOL.push("GEMINI_API_KEY");
-}
-if (SELFIE_KEY_POOL.length === 0 && process.env.GEMINI_API_KEY) {
-  SELFIE_KEY_POOL.push("GEMINI_API_KEY");
-}
+];
 
 let selfieIndex = 0;
 let docIndex = 0;
@@ -110,29 +102,39 @@ async function incrementKeyCallCount(supabase, keyName) {
 }
 
 async function getAvailableKey(supabase, taskType) {
-  const pool = (taskType === 'selfie' && SELFIE_KEY_POOL.length > 0) ? SELFIE_KEY_POOL : DOC_KEY_POOL;
-  if (!pool || pool.length === 0) {
-    return process.env.GEMINI_API_KEY && !isKeyOnCooldown("GEMINI_API_KEY") ? "GEMINI_API_KEY" : null;
-  }
-
-  let startIndex = (taskType === 'selfie') ? selfieIndex : docIndex;
-
-  for (let i = 0; i < pool.length; i++) {
-    const idx = (startIndex + i) % pool.length;
-    const candidate = pool[idx];
-    if (!isKeyOnCooldown(candidate)) {
-      if (taskType === 'selfie') selfieIndex = (idx + 1) % pool.length;
-      else docIndex = (idx + 1) % pool.length;
-      return candidate;
+  const isSelfie = taskType === 'selfie';
+  
+  if (isSelfie) {
+    const validSelfieKeys = SELFIE_KEY_NAMES.filter(name => Boolean(process.env[name]));
+    if (validSelfieKeys.length > 0) {
+      for (let i = 0; i < validSelfieKeys.length; i++) {
+        const candidate = validSelfieKeys[(selfieIndex + i) % validSelfieKeys.length];
+        if (!isKeyOnCooldown(candidate)) {
+          selfieIndex = (selfieIndex + i + 1) % validSelfieKeys.length;
+          return candidate;
+        }
+      }
+    }
+  } else {
+    // Treats 'notes', 'document', etc., using DOC_KEY_NAMES
+    const validDocKeys = DOC_KEY_NAMES.filter(name => Boolean(process.env[name]));
+    if (validDocKeys.length > 0) {
+      for (let i = 0; i < validDocKeys.length; i++) {
+        const candidate = validDocKeys[(docIndex + i) % validDocKeys.length];
+        if (!isKeyOnCooldown(candidate)) {
+          docIndex = (docIndex + i + 1) % validDocKeys.length;
+          return candidate;
+        }
+      }
     }
   }
 
-  // Fallback: check GEMINI_API_KEY if not already tried
+  // Global Fallback
   if (process.env.GEMINI_API_KEY && !isKeyOnCooldown("GEMINI_API_KEY")) {
     return "GEMINI_API_KEY";
   }
 
-  return null; // All keys on cooldown
+  return null;
 }
 
 function resolveKeyValue(keyName) {
