@@ -416,8 +416,8 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
       "Gemini generateContent"
     );
   } catch (aiErr) {
+    if (typeof leaseHeartbeat !== "undefined") clearInterval(leaseHeartbeat);
     if (aiErr.isTimeout) {
-      if (typeof leaseHeartbeat !== "undefined") clearInterval(leaseHeartbeat);
       throw { isTimeout: true, message: aiErr.message };
     }
     var statusCode = aiErr.status || aiErr.statusCode || (aiErr.message && aiErr.message.indexOf("429") !== -1 ? 429 : 0);
