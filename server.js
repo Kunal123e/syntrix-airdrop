@@ -13,10 +13,24 @@ const { awardXP, getXPProfile, calculateFinalTaskReward } = require("./xpengine"
 const app = express();
 
 // ================= CORS & HEADERS =================
+const allowedOriginPatterns = [
+  /^https?:\/\/localhost(:\d+)?$/,
+  /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
+  /^https:\/\/([a-zA-Z0-9-]+\.)*vercel\.app$/,
+  /^https:\/\/([a-zA-Z0-9-]+\.)*syntrix\.io$/
+];
+
 app.use(cors({
-  // STAGING MODE: Dynamically reflect any origin to satisfy credentials: true without blocking Vercel preview URLs
   origin: function (origin, callback) {
-    callback(null, origin || true);
+    if (!origin) return callback(null, true);
+    if (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL) {
+      return callback(null, true);
+    }
+    const isAllowed = allowedOriginPatterns.some(pattern => pattern.test(origin));
+    if (isAllowed) {
+      return callback(null, true);
+    }
+    return callback(new Error("CORS policy violation: Origin not allowed"), false);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
@@ -87,1124 +101,989 @@ if (process.env.RPC_URL && process.env.PRIVATE_KEY && process.env.TOKEN_ADDRESS)
     provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
     tokenContract = new ethers.Contract(process.env.TOKEN_ADDRESS, TOKEN_ABI, wallet);
-    console.log("Blockchain system online. Master Wallet Address:", wallet.address);
-  } catch (err) {
-    console.error("Blockchain provider initialization failed:", err.message);
+    console.log("Connected to Polygon Network successfully.");
+  } catch (e) {
+    console.error("Polygon initialization failed. Running in fallback mode.", e.message);
   }
 } else {
-  console.warn("Blockchain credentials missing in .env. Claim routes will run in MOCK queue engine mode.");
+  console.log("Polygon credentials incomplete. Platform will simulate blockchain execution.");
 }
 
-// ================= BREVO HTTP EMAIL API SETUP =================
-const BREVO_API_KEY = process.env.BREVO_API_KEY;
-const SENDER_NAME = "Syntrix Network";
-
-async function sendEmailHTTP(toEmail, subject, htmlContent) {
-  if (!BREVO_API_KEY) {
-    throw new Error("BREVO_API_KEY is missing in environment variables.");
+// ================= EMAIL ENGINE (HTTP API — Production Stable) =================
+async function sendEmailHTTP({ to, subject, htmlContent }) {
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) {
+    console.warn("BREVO_API_KEY missing. Skipping email dispatch.");
+    return false;
   }
 
-  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
-    method: "POST",
-    headers: {
-      "accept": "application/json",
-      "api-key": BREVO_API_KEY,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      sender: { name: SENDER_NAME, email: "syntrix.care@gmail.com" },
-      to: [{ email: toEmail }],
-      subject: subject,
-      htmlContent: htmlContent
-    })
-  });
-
-  if (!response.ok) {
-    const errorData = await response.text();
-    console.error("Brevo API Error:", errorData);
-    throw new Error(`Brevo Error: ${errorData}`);
-  }
-  return await response.json();
-}
-
-// ================= HELPERS =================
-function generateReferralCode(email) {
-  const cleanEmail = email.trim().toLowerCase();
-  const hash = crypto.createHash("sha256").update(cleanEmail).digest("hex");
-  const uniqueChars = hash.substring(0, 6).toUpperCase();
-  return `SYN-${uniqueChars}`;
-}
-
-function normalizeReferralCode(code) {
-  if (!code) return "";
-  let clean = code.trim().toUpperCase();
-  clean = clean.replace(/\s+/g, "");
-  if (!clean.startsWith("SYN-")) {
-    if (clean.startsWith("SYN")) clean = "SYN-" + clean.substring(3);
-    else clean = "SYN-" + clean;
-  }
-  if (clean.length > 10) clean = clean.substring(0, 10);
-  return clean;
-}
-
-async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
-  if (!claimToken) return false;
-
-  const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-  const claimLink = `${frontendUrl}/claim?token=${claimToken}`;
-
-  const htmlBody = `
-    <div style="font-family: 'Segoe UI', Arial, sans-serif; padding: 30px; color: #1e293b; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff;">
-      <h2 style="color: #4f46e5; margin-top: 0; font-size: 24px; border-bottom: 2px solid #f1f5f9; padding-bottom: 15px;">You Earned SYNTRIX Tokens!</h2>
-      <p style="font-size: 16px; line-height: 1.6;">Hello,</p>
-      <p style="font-size: 16px; line-height: 1.6;">Great news! A user completed the onboarding survey using your referral link.</p>
-      <div style="background-color: #f8fafc; border-left: 4px solid #4f46e5; padding: 15px; margin: 20px 0; border-radius: 4px;">
-        <p style="margin: 0; font-size: 16px; font-weight: bold; color: #1e293b;">
-          Reward Amount: <span style="color: #4f46e5;">${rewardAmount} SYNTRIX Tokens</span>
-        </p>
-      </div>
-      <a href="${claimLink}" style="background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); color: #ffffff; padding: 14px 28px; text-decoration: none; font-weight: bold; border-radius: 8px; display: inline-block;">Claim Your Tokens Now &rarr;</a>
-    </div>
-  `;
+  const payload = {
+    sender: { name: "Syntrix Network", email: "syntrix.io@gmail.com" },
+    to: [{ email: to }],
+    subject: subject,
+    htmlContent: htmlContent
+  };
 
   try {
-    await sendEmailHTTP(referrerEmail, `You Earned ${rewardAmount} SYNTRIX Tokens`, htmlBody);
+    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "accept": "application/json",
+        "api-key": apiKey,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      console.error(`Brevo HTTP Error [${response.status}]:`, errBody);
+      return false;
+    }
     return true;
-  } catch (error) {
-    console.error(`Failed to send API email to ${referrerEmail}:`, error.message);
+  } catch (err) {
+    console.error("Brevo dispatch exception:", err.message);
     return false;
   }
 }
 
-// ================= OTP MEMORY STORE =================
-const otpStorage = {};
+// ================= OTP GENERATOR & RATE LIMITER =================
+const otpStorage = new Map();
+const otpRateLimits = new Map();
 
-setInterval(() => {
-  const now = Date.now();
-  for (const email in otpStorage) {
-    if (otpStorage[email].expires < now) delete otpStorage[email];
-  }
-}, 10 * 60 * 1000);
+function generateSecureOTP() {
+  return crypto.randomInt(100000, 999999).toString();
+}
 
-const otpCooldowns = new Map();
-
-// ================= OTP ROUTES =================
 app.post("/api/send-otp", async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: "Email required." });
-
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
-    return res.status(400).json({ error: "Invalid email format." });
-  }
-
-  const sanitizedEmail = email.trim().toLowerCase();
-
-  // Rate Limiting: 60-second cooldown per email
-  if (otpCooldowns.has(sanitizedEmail)) {
-    const lastSent = otpCooldowns.get(sanitizedEmail);
-    if (Date.now() - lastSent < 60000) {
-      return res.status(429).json({ error: "Please wait 60 seconds before requesting another code." });
-    }
-  }
-
-  const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-
-  otpStorage[sanitizedEmail] = {
-    otp: otpCode,
-    expires: Date.now() + 10 * 60 * 1000
-  };
-
-  otpCooldowns.set(sanitizedEmail, Date.now());
-
-  const htmlBody = `
-    <div style="font-family: Arial, sans-serif; padding: 25px; border: 1px solid #e2e8f0; border-radius: 12px; max-width: 500px;">
-      <h2 style="color: #4f46e5; margin-top: 0;">Syntrix Verification</h2>
-      <p>Please use the following 6-digit code to verify your identity and enter the network.</p>
-      <div style="background-color: #f8fafc; padding: 15px; margin: 20px 0; text-align: center; border-radius: 6px;">
-        <span style="font-size: 28px; font-weight: bold; letter-spacing: 5px; color: #1e293b;">${otpCode}</span>
-      </div>
-      <p style="color: #64748b; font-size: 12px;">This code will expire in 10 minutes.</p>
-    </div>
-  `;
-
   try {
-    await sendEmailHTTP(sanitizedEmail, `Your Syntrix Verification Code: ${otpCode}`, htmlBody);
-    return res.json({ success: true, message: "OTP Sent" });
+    const { email } = req.body;
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ success: false, message: "Valid email address is strictly required." });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const now = Date.now();
+    const lastSent = otpRateLimits.get(normalizedEmail) || 0;
+
+    if (now - lastSent < 60000) {
+      const remainingSeconds = Math.ceil((60000 - (now - lastSent)) / 1000);
+      return res.status(429).json({
+        success: false,
+        message: `Security cooldown active. Please wait ${remainingSeconds} seconds before requesting another code.`
+      });
+    }
+
+    const otp = generateSecureOTP();
+    otpStorage.set(normalizedEmail, { otp, expiresAt: now + 600000 }); // 10 minutes
+    otpRateLimits.set(normalizedEmail, now);
+
+    const emailHTML = `
+      <div style="background-color: #030308; padding: 40px 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #f4f4f5; text-align: center;">
+        <div style="max-width: 480px; margin: 0 auto; background: #0c0c14; border: 1px solid #1f1f2e; border-radius: 16px; padding: 32px; box-shadow: 0 8px 32px rgba(0,0,0,0.4);">
+          <h1 style="color: #ffffff; font-size: 24px; font-weight: 800; margin-bottom: 8px; letter-spacing: -0.5px;">Syntrix Network</h1>
+          <p style="color: #a1a1aa; font-size: 14px; margin-bottom: 24px;">Decentralized AI Verification Matrix</p>
+          <div style="background: #141420; border: 1px solid #27273a; border-radius: 12px; padding: 24px; margin-bottom: 24px;">
+            <span style="font-size: 36px; font-weight: 900; letter-spacing: 6px; color: #6366f1; font-family: monospace;">${otp}</span>
+          </div>
+          <p style="color: #71717a; font-size: 13px; line-height: 1.5; margin: 0;">This cryptographic one-time passcode expires in 10 minutes. If you did not initiate this authentication request, please disregard this transmission.</p>
+        </div>
+      </div>
+    `;
+
+    const dispatched = await sendEmailHTTP({
+      to: normalizedEmail,
+      subject: `[Syntrix Verification] Access Code: ${otp}`,
+      htmlContent: emailHTML
+    });
+
+    if (!dispatched) {
+      return res.status(500).json({ success: false, message: "Email delivery failure via Brevo API." });
+    }
+
+    return res.status(200).json({ success: true, message: "Cryptographic passcode successfully dispatched." });
   } catch (err) {
-    return res.status(500).json({ error: "Failed to deliver email via HTTP API." });
+    console.error("Critical OTP Route Failure:", err);
+    return res.status(500).json({ success: false, message: "Internal server error during authentication sequence." });
   }
 });
 
 app.post("/api/verify-otp", async (req, res) => {
-  const { email, otp, referral_code } = req.body;
-  if (!email || !otp) return res.status(400).json({ error: "Email and OTP required." });
-
-  const sanitizedEmail = email.trim().toLowerCase();
-  const record = otpStorage[sanitizedEmail];
-
-  if (!record) return res.status(400).json({ error: "OTP expired or not requested. Please send a new code." });
-  if (record.expires < Date.now()) {
-    delete otpStorage[sanitizedEmail];
-    return res.status(400).json({ error: "OTP has expired." });
-  }
-  if (record.otp !== otp.trim()) return res.status(400).json({ error: "Invalid OTP code." });
-
-  delete otpStorage[sanitizedEmail];
-
-  // ---- Normalize & Save Referral Code ----
-  let normalizedRef = null;
-  if (referral_code && referral_code.trim().length > 0) {
-    let raw = referral_code.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-    // Strip existing SYN prefix if user typed it
-    if (raw.startsWith("SYN")) raw = raw.substring(3);
-    if (raw.length > 0) normalizedRef = "SYN-" + raw;
-  }
-
-  // Upsert user record with referred_by code
   try {
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", sanitizedEmail)
-      .maybeSingle();
-
-    if (existingUser) {
-      // Only update referred_by if it hasn't been set yet
-      if (normalizedRef) {
-        await supabase.from("users").update({ referred_by: normalizedRef }).eq("email", sanitizedEmail).is("referred_by", null);
-      }
-    } else {
-      await supabase.from("users").insert([{ email: sanitizedEmail, referred_by: normalizedRef }]);
+    const { email, otp, referralCode } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, message: "Email and OTP passcode are required." });
     }
-  } catch (dbErr) {
-    console.error("[VERIFY-OTP] Referral save failed:", dbErr.message);
-    // Non-fatal: don't block OTP success
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const record = otpStorage.get(normalizedEmail);
+
+    if (!record) {
+      return res.status(400).json({ success: false, message: "No active authentication record exists for this address. Request a new code." });
+    }
+
+    if (Date.now() > record.expiresAt) {
+      otpStorage.delete(normalizedEmail);
+      return res.status(400).json({ success: false, message: "Authentication passcode has expired. Request a new code." });
+    }
+
+    if (record.otp !== otp.toString().trim()) {
+      return res.status(400).json({ success: false, message: "Invalid cryptographic passcode provided." });
+    }
+
+    otpStorage.delete(normalizedEmail);
+
+    // Verify or generate referral code for this user
+    let userReferralCode = null;
+    const { data: existingClaim } = await supabase
+      .from("syntrix_claims")
+      .select("referral_code")
+      .eq("email", normalizedEmail)
+      .single();
+
+    if (existingClaim && existingClaim.referral_code) {
+      userReferralCode = existingClaim.referral_code;
+    } else {
+      userReferralCode = "SYN-" + crypto.randomBytes(3).toString("hex").toUpperCase();
+    }
+
+    // Process referrer if new user and code provided
+    if (referralCode) {
+      const cleanRefCode = referralCode.trim().toUpperCase();
+      const { data: referrerClaim } = await supabase
+        .from("syntrix_claims")
+        .select("email")
+        .eq("referral_code", cleanRefCode)
+        .single();
+
+      if (referrerClaim && referrerClaim.email !== normalizedEmail) {
+        const { data: existingRef } = await supabase
+          .from("syntrix_referrals")
+          .select("id")
+          .eq("referred_email", normalizedEmail)
+          .single();
+
+        if (!existingRef) {
+          const claimToken = "CLAIM-REF-" + crypto.randomBytes(12).toString("hex");
+          await supabase.from("syntrix_referrals").insert([{
+            referrer_email: referrerClaim.email,
+            referred_email: normalizedEmail,
+            referral_code: cleanRefCode,
+            reward_amount: 50,
+            status: "pending",
+            claim_token: claimToken
+          }]);
+          
+          await supabase.from("users").upsert({
+            email: normalizedEmail,
+            referred_by: referrerClaim.email
+          }, { onConflict: "email" });
+        }
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Identity verified successfully.",
+      user: {
+        email: normalizedEmail,
+        referralCode: userReferralCode
+      }
+    });
+  } catch (err) {
+    console.error("Critical OTP Verification Failure:", err);
+    return res.status(500).json({ success: false, message: "Internal server error during verification sequence." });
   }
-
-  return res.json({ success: true });
 });
 
-// ================= TEST & UTILITY ROUTES =================
-app.get("/", (req, res) => {
-  res.json({ success: true, message: "Syntrix Network API Engine Active" });
-});
+// ================= CONSUMER SURVEY ENGINE =================
+const BADGE_MAP = {
+  1: { id: "mindful", name: "The Mindful Shopper", color: "#2563eb" },
+  2: { id: "explorer", name: "The Tasteful Explorer", color: "#8b5cf6" },
+  3: { id: "planner", name: "The Thoughtful Planner", color: "#ea580c" },
+  4: { id: "connected", name: "The Connected Heart", color: "#eab308" }
+};
 
-app.post("/api/test-email", async (req, res) => {
-  const { toEmail } = req.body;
+app.post("/api/submit-survey", async (req, res) => {
   try {
-    await sendEmailHTTP(toEmail, "HTTP API TEST", "<p>API connection successful.</p>");
-    return res.json({ success: true, message: "HTTP API email sent successfully." });
+    const { email, surveyData, durationSeconds } = req.body;
+
+    if (!email || !surveyData) {
+      return res.status(400).json({ success: false, message: "Missing required survey parameters." });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Anti-bot speed trap: Human completion requires minimum 40 seconds
+    if (durationSeconds && durationSeconds < 40) {
+      return res.status(400).json({
+        success: false,
+        message: "Quality Control Violation: Survey completed too rapidly. Please provide thoughtful responses."
+      });
+    }
+
+    // Determine Reward Tier
+    let rewardAmount = 50;
+    if (durationSeconds) {
+      if (durationSeconds >= 120) rewardAmount = 85;
+      else if (durationSeconds >= 60) rewardAmount = 60;
+      else rewardAmount = 30;
+    }
+
+    // Assign Algorithmic Badge Archetype
+    const randomBadgeId = crypto.randomInt(1, 5);
+    const assignedBadge = BADGE_MAP[randomBadgeId];
+
+    // Persist or Update Claim Record
+    const { data: existingClaim, error: fetchErr } = await supabase
+      .from("syntrix_claims")
+      .select("*")
+      .eq("email", normalizedEmail)
+      .single();
+
+    let userReferralCode;
+
+    if (!existingClaim) {
+      userReferralCode = "SYN-" + crypto.randomBytes(3).toString("hex").toUpperCase();
+      const { error: insertErr } = await supabase.from("syntrix_claims").insert([{
+        email: normalizedEmail,
+        amount_rewarded: rewardAmount,
+        status: "pending_claim",
+        referral_code: userReferralCode,
+        survey_data: surveyData,
+        survey_duration_seconds: durationSeconds || 0,
+        assigned_badge: assignedBadge
+      }]);
+      if (insertErr) throw insertErr;
+    } else {
+      userReferralCode = existingClaim.referral_code;
+      const updatedTotal = Number(existingClaim.amount_rewarded || 0) + rewardAmount;
+      const { error: updateErr } = await supabase
+        .from("syntrix_claims")
+        .update({
+          amount_rewarded: updatedTotal,
+          survey_data: surveyData,
+          assigned_badge: assignedBadge,
+          survey_duration_seconds: durationSeconds || 0
+        })
+        .eq("email", normalizedEmail);
+      if (updateErr) throw updateErr;
+    }
+
+    // Update User Balance in `users` table
+    const { data: userProfile } = await supabase
+      .from("users")
+      .select("pendingRewards")
+      .eq("email", normalizedEmail)
+      .single();
+
+    const currentPending = Number(userProfile?.pendingRewards || 0);
+    await supabase.from("users").upsert({
+      email: normalizedEmail,
+      pendingRewards: currentPending + rewardAmount
+    }, { onConflict: "email" });
+
+    // AWARD XP: Base Survey Completion (+300 XP or +500 XP if >120s)
+    const xpAmount = (durationSeconds && durationSeconds >= 120) ? 500 : 300;
+    const xpAction = (durationSeconds && durationSeconds >= 120) ? "SURVEY_COMPLETED_PREMIUM" : "SURVEY_COMPLETED";
+    await awardXP(supabase, normalizedEmail, xpAmount, xpAction, { durationSeconds, rewardAmount });
+
+    return res.status(200).json({
+      success: true,
+      rewardAmount,
+      referralCode: userReferralCode,
+      assignedBadge,
+      message: "Survey authenticated and rewards successfully credited to ledger."
+    });
+  } catch (err) {
+    console.error("Survey Processing Exception:", err);
+    return res.status(500).json({ success: false, message: "Database execution error during survey ingestion." });
+  }
+});
+
+// ================= USER PROFILE & REWARD STATUS =================
+app.get("/api/user-status", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email query parameter required." });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // 1. Fetch User Record
+    const { data: userRecord } = await supabase
+      .from("users")
+      .select("pendingRewards, claimedRewards, wallet_address")
+      .eq("email", normalizedEmail)
+      .single();
+
+    // 2. Fetch Claim Data
+    const { data: claimRecord } = await supabase
+      .from("syntrix_claims")
+      .select("*")
+      .eq("email", normalizedEmail)
+      .single();
+
+    // 3. Fetch Referral Count
+    const { count: referralCount } = await supabase
+      .from("syntrix_referrals")
+      .select("*", { count: "exact", head: true })
+      .eq("referrer_email", normalizedEmail);
+
+    // DAILY LOGIN XP CHECK
+    const { data: xpRow } = await supabase
+      .from("user_xp")
+      .select("last_active_at, daily_streak")
+      .eq("user_email", normalizedEmail)
+      .single();
+
+    if (xpRow && xpRow.last_active_at) {
+      const lastActive = new Date(xpRow.last_active_at).getTime();
+      const now = Date.now();
+      const diffHours = (now - lastActive) / (1000 * 60 * 60);
+
+      if (diffHours >= 24) {
+        let newStreak = xpRow.daily_streak || 1;
+        if (diffHours <= 48) newStreak += 1;
+        else newStreak = 1;
+
+        await awardXP(supabase, normalizedEmail, 10, "DAILY_LOGIN", { streak: newStreak });
+        if (newStreak % 7 === 0) {
+          await awardXP(supabase, normalizedEmail, 100, "STREAK_7_DAY", { streak: newStreak });
+        }
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      pendingBalance: Number(userRecord?.pendingRewards || claimRecord?.amount_rewarded || 0),
+      claimedBalance: Number(userRecord?.claimedRewards || 0),
+      referralCode: claimRecord?.referral_code || null,
+      referralCount: referralCount || 0,
+      assignedBadge: claimRecord?.assigned_badge || null,
+      walletAddress: userRecord?.wallet_address || claimRecord?.wallet_address || null
+    });
+  } catch (err) {
+    console.error("Status Query Exception:", err);
+    return res.status(500).json({ success: false, message: "Database failure retrieving account metrics." });
+  }
+});
+
+// ================= LEGACY SINGLE TASK UPLOAD (Selfie & Doc Support) =================
+app.post("/api/upload-task", async (req, res) => {
+  try {
+    const { email, userEmail, taskType, fileName, imageBase64, contentTags, assignedTask } = req.body;
+    const targetEmail = (email || userEmail || "").toLowerCase().trim();
+
+    if (!targetEmail || !taskType || !imageBase64) {
+      return res.status(400).json({ success: false, error: "Missing required upload parameters." });
+    }
+
+    const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
+    const buffer = Buffer.from(base64Data, "base64");
+
+    if (buffer.length < 1024) {
+      return res.status(400).json({ success: false, error: "File payload corrupted or too small (<1KB)." });
+    }
+
+    // SHA-256 Hash Duplicate Guard
+    const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
+    const { data: existingSubmissions } = await supabase
+      .from("syntrix_submissions")
+      .select("id")
+      .eq("file_hash", fileHash)
+      .limit(1);
+
+    if (existingSubmissions && existingSubmissions.length > 0) {
+      return res.status(400).json({ success: false, error: "Duplicate document detected. This image has already been submitted." });
+    }
+
+    // Upload to Supabase Storage
+    const safeFileName = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}.jpeg`;
+    const storagePath = `pending/${targetEmail}/${safeFileName}`;
+
+    const { error: uploadErr } = await supabase.storage
+      .from("verified_assets")
+      .upload(storagePath, buffer, { contentType: "image/jpeg", upsert: true });
+
+    if (uploadErr) {
+      console.error("Storage upload failed:", uploadErr);
+      return res.status(500).json({ success: false, error: "Failed to upload file to asset vault." });
+    }
+
+    const { data: publicUrlData } = supabase.storage
+      .from("verified_assets")
+      .getPublicUrl(storagePath);
+
+    const storageUrl = publicUrlData ? publicUrlData.publicUrl : null;
+
+    // Insert pending submission
+    const { data: submission, error: subErr } = await supabase
+      .from("syntrix_submissions")
+      .insert([{
+        email: targetEmail,
+        task_type: taskType,
+        file_name: fileName || safeFileName,
+        storage_url: storageUrl,
+        contentTags: contentTags || ["none"],
+        file_hash: fileHash,
+        status: "processing",
+        reason: "Queued for automated AI inspection."
+      }])
+      .select()
+      .single();
+
+    if (subErr) throw subErr;
+
+    // Trigger immediate background evaluation if key is available
+    if (process.env.GEMINI_API_KEY || process.env.GEMINI_API_SELFIE) {
+      setImmediate(async () => {
+        try {
+          const apiKey = taskType === "selfie"
+            ? (process.env.GEMINI_API_SELFIE || process.env.GEMINI_API_KEY)
+            : process.env.GEMINI_API_KEY;
+
+          const ai = new GoogleGenAI({ apiKey });
+
+          let prompt = "";
+          if (taskType === "selfie") {
+            prompt = `Analyze this selfie image strictly for human verification.
+Confirm:
+1. Is this a genuine real human selfie?
+2. Is the face clearly visible and well lit?
+3. Does it contain any spoofing, screens, printed photos, or explicit content?
+Respond strictly in JSON format:
+{
+  "quality_pass": true or false,
+  "contains_pii": false,
+  "confidence_score": 0.0 to 1.0,
+  "reason": "Brief technical summary"
+}`;
+          } else {
+            prompt = `Analyze this handwritten student document or academic note image for data quality.
+Confirm:
+1. Is it genuine handwritten academic/student content?
+2. Is the text legible?
+3. Does it contain sensitive PII (passports, credit cards, SSN, personal phone numbers)?
+Respond strictly in JSON format:
+{
+  "quality_pass": true or false,
+  "contains_pii": true or false,
+  "confidence_score": 0.0 to 1.0,
+  "reason": "Brief technical summary"
+}`;
+          }
+
+          const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: [
+              { role: "user", parts: [{ text: prompt }, { inlineData: { mimeType: "image/jpeg", data: base64Data } }] }
+            ]
+          });
+
+          let resultText = response.text || "";
+          resultText = resultText.replace(/```json/g, "").replace(/```/g, "").trim();
+          const analysis = JSON.parse(resultText);
+
+          if (analysis.quality_pass && !analysis.contains_pii) {
+            const reward = taskType === "selfie" ? 40 : 48;
+
+            await supabase
+              .from("syntrix_submissions")
+              .update({
+                status: "verified",
+                reason: analysis.reason || "Verified by Syntrix AI Matrix.",
+                reward_amount: reward
+              })
+              .eq("id", submission.id);
+
+            // Update user balance
+            const { data: u } = await supabase.from("users").select("pendingRewards").eq("email", targetEmail).single();
+            const newBal = Number(u?.pendingRewards || 0) + reward;
+            await supabase.from("users").upsert({ email: targetEmail, pendingRewards: newBal }, { onConflict: "email" });
+
+            // Award XP
+            const xpType = taskType === "selfie" ? "SELFIE_VERIFIED" : "DOCUMENT_VERIFIED";
+            const xpPts = taskType === "selfie" ? 60 : 70;
+            await awardXP(supabase, targetEmail, xpPts, xpType, { taskType, reward });
+
+          } else {
+            await supabase
+              .from("syntrix_submissions")
+              .update({
+                status: "rejected",
+                reason: analysis.reason || "Failed quality or security checks."
+              })
+              .eq("id", submission.id);
+          }
+        } catch (evalErr) {
+          console.error("Async evaluation error:", evalErr);
+          await supabase
+            .from("syntrix_submissions")
+            .update({ status: "rejected", reason: "AI pipeline timeout or validation error." })
+            .eq("id", submission.id);
+        }
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Submission received and queued for biometric/quality verification.",
+      submissionId: submission.id
+    });
+
+  } catch (err) {
+    console.error("Upload Task Exception:", err);
+    return res.status(500).json({ success: false, error: "Internal server error during upload sequence." });
+  }
+});
+
+// GET /api/check-submission (Used by frontend polling)
+app.get("/api/check-submission", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ success: false, error: "Email query param required" });
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Check syntrix_submissions first
+    const { data: submission } = await supabase
+      .from("syntrix_submissions")
+      .select("status, reason, reward_amount, created_at")
+      .eq("email", normalizedEmail)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (submission) {
+      return res.status(200).json({ success: true, submission });
+    }
+
+    // Fall back to upload_jobs
+    const { data: job } = await supabase
+      .from("upload_jobs")
+      .select("status, reason, reward_amount, created_at")
+      .eq("user_email", normalizedEmail)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (job) {
+      return res.status(200).json({ success: true, submission: job });
+    }
+
+    return res.status(200).json({ success: false, message: "No submissions found." });
+  } catch (err) {
+    console.error("Check submission error:", err);
+    return res.status(500).json({ success: false, error: "Database error polling submission." });
+  }
+});
+
+// GET /api/xp-profile
+app.get("/api/xp-profile", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ success: false, error: "Email parameter required." });
+
+    const profile = await getXPProfile(supabase, email.toLowerCase().trim());
+    return res.status(200).json({ success: true, profile });
+  } catch (err) {
+    console.error("XP Profile query error:", err);
+    return res.status(500).json({ success: false, error: "Failed to retrieve XP profile." });
+  }
+});
+
+// ================= BLOCKCHAIN CLAIM PIPELINE =================
+app.post("/api/claim-reward", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ success: false, message: "Email required." });
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const { data: userProfile } = await supabase
+      .from("users")
+      .select("pendingRewards")
+      .eq("email", normalizedEmail)
+      .single();
+
+    const pending = Number(userProfile?.pendingRewards || 0);
+    if (pending <= 0) {
+      return res.status(400).json({ success: false, message: "No claimable SYNX balance available." });
+    }
+
+    const claimToken = "CLAIM-" + crypto.randomBytes(16).toString("hex");
+
+    await supabase.from("syntrix_rewards").insert([{
+      email: normalizedEmail,
+      reward_type: "BALANCE_CASHOUT",
+      amount: pending,
+      status: "unclaimed",
+      claim_token: claimToken
+    }]);
+
+    return res.status(200).json({
+      success: true,
+      claimToken,
+      amount: pending,
+      message: "Cryptographic claim token generated. Proceed to Web3 wallet settlement."
+    });
+  } catch (err) {
+    console.error("Claim Token Generation Exception:", err);
+    return res.status(500).json({ success: false, message: "Database execution failure creating claim token." });
+  }
+});
+
+app.post("/api/execute-claim", async (req, res) => {
+  try {
+    const { claimToken, walletAddress, signature } = req.body;
+
+    if (!claimToken || !walletAddress || !signature) {
+      return res.status(400).json({ success: false, message: "ClaimToken, wallet address, and signature are mandatory." });
+    }
+
+    if (!ethers.isAddress(walletAddress)) {
+      return res.status(400).json({ success: false, message: "Invalid EVM wallet address format." });
+    }
+
+    // Verify Web3 Cryptographic Signature
+    const expectedMessage = `Sign this message to authorize your Syntrix Network settlement. Token: ${claimToken}`;
+    let signerAddress;
+    try {
+      signerAddress = ethers.verifyMessage(expectedMessage, signature);
+    } catch (sigErr) {
+      return res.status(400).json({ success: false, message: "Cryptographic signature verification failed." });
+    }
+
+    if (signerAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+      return res.status(400).json({ success: false, message: "Signer address does not match provided wallet." });
+    }
+
+    // Fetch Reward Record
+    const { data: rewardRecord, error: rewardErr } = await supabase
+      .from("syntrix_rewards")
+      .select("*")
+      .eq("claim_token", claimToken)
+      .single();
+
+    if (rewardErr || !rewardRecord) {
+      return res.status(404).json({ success: false, message: "Invalid or nonexistent claim token." });
+    }
+
+    if (rewardRecord.status === "claimed" || rewardRecord.status === "queued") {
+      return res.status(400).json({ success: false, message: "This claim token has already been submitted for execution." });
+    }
+
+    // Enqueue for blockchain processing
+    await supabase.from("syntrix_payout_queue").insert([{
+      email: rewardRecord.email,
+      wallet_address: walletAddress,
+      reward_amount: rewardRecord.amount,
+      claim_token: claimToken,
+      status: "queued"
+    }]);
+
+    await supabase
+      .from("syntrix_rewards")
+      .update({ status: "queued", claimed_wallet: walletAddress })
+      .eq("claim_token", claimToken);
+
+    // Reset pending balance in users table
+    const { data: userRec } = await supabase.from("users").select("pendingRewards, claimedRewards").eq("email", rewardRecord.email).single();
+    const curPending = Number(userRec?.pendingRewards || 0);
+    const curClaimed = Number(userRec?.claimedRewards || 0);
+
+    await supabase.from("users").upsert({
+      email: rewardRecord.email,
+      pendingRewards: Math.max(0, curPending - Number(rewardRecord.amount)),
+      claimedRewards: curClaimed + Number(rewardRecord.amount),
+      wallet_address: walletAddress
+    }, { onConflict: "email" });
+
+    return res.status(200).json({
+      success: true,
+      message: "Claim submitted to settlement queue. Transaction processing on Polygon L2."
+    });
+
+  } catch (err) {
+    console.error("Execute Claim Exception:", err);
+    return res.status(500).json({ success: false, message: "Internal server error during settlement." });
+  }
+});
+
+app.get("/api/claim-details", async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ success: false, message: "Token query param required" });
+
+    const { data, error } = await supabase
+      .from("syntrix_rewards")
+      .select("amount, status, email, created_at, claimed_at, tx_hash")
+      .eq("claim_token", token)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ success: false, message: "Claim token not found." });
+    }
+
+    return res.status(200).json({ success: true, claim: data });
+  } catch (err) {
+    console.error("Claim details error:", err);
+    return res.status(500).json({ success: false, message: "Database lookup failure." });
+  }
+});
+
+// ================= REFERRAL & INVITE ROUTES =================
+app.post("/api/send-invite", async (req, res) => {
+  try {
+    const { referrerEmail, recipientEmail, referralCode } = req.body;
+    if (!referrerEmail || !recipientEmail || !referralCode) {
+      return res.status(400).json({ success: false, message: "All invite parameters are required." });
+    }
+
+    const inviteLink = `https://syntrix.io/r/${referralCode}`;
+    const emailHTML = `
+      <div style="background-color: #030308; padding: 40px 20px; font-family: sans-serif; color: #f4f4f5; text-align: center;">
+        <div style="max-width: 480px; margin: 0 auto; background: #0c0c14; border: 1px solid #1f1f2e; border-radius: 16px; padding: 32px;">
+          <h2 style="color: #6366f1;">You're Invited to Syntrix Network</h2>
+          <p style="color: #a1a1aa; font-size: 14px;">Your colleague <strong>${referrerEmail}</strong> invited you to join the Decentralized AI Data Verification Matrix.</p>
+          <div style="margin: 30px 0;">
+            <a href="${inviteLink}" style="background: #6366f1; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold;">Accept Invitation & Earn 50 SYNX</a>
+          </div>
+          <p style="color: #71717a; font-size: 12px;">Referral Code: ${referralCode}</p>
+        </div>
+      </div>
+    `;
+
+    const sent = await sendEmailHTTP({
+      to: recipientEmail,
+      subject: `[Syntrix Invite] Join the decentralized AI revolution with 50 bonus SYNX`,
+      htmlContent: emailHTML
+    });
+
+    if (!sent) return res.status(500).json({ success: false, message: "Failed to dispatch email via Brevo." });
+
+    return res.status(200).json({ success: true, message: "Invitation dispatched successfully." });
+  } catch (err) {
+    console.error("Invite sending error:", err);
+    return res.status(500).json({ success: false, message: "Error dispatching invite email." });
+  }
+});
+
+app.get("/r/:refCode", (req, res) => {
+  const { refCode } = req.params;
+  const targetUrl = (process.env.FRONTEND_URL || "https://syntrix.io") + `?ref=${encodeURIComponent(refCode)}`;
+  res.redirect(302, targetUrl);
+});
+
+// ================= ADMIN SECURED ENDPOINTS =================
+function verifyAdminAccess(req, res, next) {
+  const adminKey = req.headers["x-admin-key"] || req.query.adminKey;
+  if (!adminKey || adminKey !== process.env.ADMIN_SECRET_KEY) {
+    return res.status(403).json({ success: false, error: "Unauthorized access: Invalid administrator key." });
+  }
+  next();
+}
+
+app.post("/api/admin/login", (req, res) => {
+  const { key } = req.body;
+  if (!key || key !== process.env.ADMIN_SECRET_KEY) {
+    return res.status(401).json({ success: false, message: "Invalid admin credential." });
+  }
+  return res.status(200).json({ success: true, token: crypto.randomBytes(24).toString("hex") });
+});
+
+app.get("/api/admin/stats", verifyAdminAccess, async (req, res) => {
+  try {
+    const { count: usersCount } = await supabase.from("users").select("*", { count: "exact", head: true });
+    const { count: submissionsCount } = await supabase.from("upload_jobs").select("*", { count: "exact", head: true });
+    const { count: batchesCount } = await supabase.from("upload_batches").select("*", { count: "exact", head: true });
+    const { count: claimsCount } = await supabase.from("syntrix_claims").select("*", { count: "exact", head: true });
+
+    return res.status(200).json({
+      success: true,
+      stats: {
+        totalUsers: usersCount || 0,
+        totalJobs: submissionsCount || 0,
+        totalBatches: batchesCount || 0,
+        totalClaims: claimsCount || 0
+      }
+    });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post("/api/send-invite", async (req, res) => {
-  const { friendEmail, referralCode, referralLink } = req.body;
-  if (!friendEmail || !referralCode || !referralLink) {
-    return res.status(400).json({ error: "Missing parameters." });
-  }
-
-  const htmlBody = `
-    <div style="font-family: Arial, sans-serif; padding: 25px; color: #1e293b; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 12px;">
-      <h2 style="color: #4f46e5; margin-top: 0;">You've been invited to Syntrix!</h2>
-      <p>Click below to join and earn token rewards.</p>
-      <a href="${referralLink}" style="background-color: #4f46e5; color: #ffffff; padding: 12px 24px; text-decoration: none; font-weight: bold; border-radius: 6px; display: inline-block;">Accept Invitation &rarr;</a>
-    </div>
-  `;
-
-  try {
-    await sendEmailHTTP(friendEmail, "Join Syntrix and earn token rewards!", htmlBody);
-    return res.json({ success: true });
-  } catch (err) {
-    return res.status(500).json({ error: err.message }); // FIX: Passes the exact Brevo error to the frontend UI
-  }
-});
-
-app.get("/r/:refCode", (req, res) => {
-  const refCode = req.params.refCode;
-  const targetDomain = process.env.FRONTEND_URL || "https://syntrix-airdrop.onrender.com";
-  res.redirect(302, `${targetDomain}/?ref=${refCode}`);
-});
-
-// ================= SURVEY INGESTION SYSTEM =================
-app.post("/api/submit-survey", async (req, res) => {
-  try {
-    const { email, referredBy, survey_data, startTime, submissionTime, persona_badge, duration_seconds, selfie_verified, selfie_consent, selfie_asset_url } = req.body;
-
-    if (!startTime || !submissionTime) {
-      return res.status(400).json({ error: "Missing required timing metrics." });
-    }
-
-    const currentTime = Date.now();
-    if (submissionTime > currentTime + 5000 || startTime > currentTime) {
-       return res.status(400).json({ error: "Invalid timestamp synchronization detected." });
-    }
-
-    const timeTaken = submissionTime - startTime;
-
-    if (!email) return res.status(400).json({ error: "Email identifier required" });
-    const sanitizedEmail = email.trim().toLowerCase();
-    const generatedReferralCode = generateReferralCode(sanitizedEmail);
-
-    const { data: existingEmail } = await supabase
-      .from("syntrix_claims")
-      .select("id")
-      .eq("email", sanitizedEmail)
-      .maybeSingle();
-
-    if (existingEmail) return res.status(400).json({ error: "This email has already submitted the survey." });
-
-    // ---- SPEED TRAP: 8 questions must take > 40 seconds minimum ----
-    const actualDuration = duration_seconds || Math.floor(timeTaken / 1000);
-    if (actualDuration < 40) {
-      console.log(`[FRAUD FLAG] User ${sanitizedEmail} completed 8 questions in ${actualDuration}s. Flagged as bot.`);
-      // Save the data but DO NOT pay tokens
-      await supabase.from("syntrix_claims").insert([{
-        email: sanitizedEmail,
-        amount_rewarded: 0,
-        status: "flagged",
-        referral_code: generatedReferralCode,
-        survey_data: survey_data,
-        survey_duration_seconds: actualDuration,
-        persona_badge: persona_badge || "Analyzer",
-        selfie_verified: selfie_verified || false,
-        selfie_consent: selfie_consent || false,
-        selfie_asset_url: selfie_asset_url || null
-      }]);
-      return res.status(200).json({ success: true, warning: "Speed threshold triggered. Manual review required.", rewarded: 0 });
-    }
-
-    // ---- TIME-BASED REWARD CALCULATION ----
-    let surveyReward = 0;
-    if (actualDuration <= 180) surveyReward = 10;       // 1-3 mins
-    else if (actualDuration <= 300) surveyReward = 25;   // 3-5 mins
-    else if (actualDuration <= 600) surveyReward = 45;   // 5-10 mins
-    else if (actualDuration <= 900) surveyReward = 65;   // 10-15 mins
-    else surveyReward = 85;                               // 15-20 mins
-
-    let referrerRecord = null;
-    let isReferralValid = false;
-
-    if (referredBy) {
-      const cleanRefCode = normalizeReferralCode(referredBy);
-      if (cleanRefCode === generatedReferralCode) return res.status(400).json({ error: "You cannot refer yourself." });
-
-      const { data: referrerClaim, error: refError } = await supabase
-        .from("syntrix_claims")
-        .select("email")
-        .eq("referral_code", cleanRefCode)
-        .maybeSingle();
-
-      if (refError || !referrerClaim) return res.status(400).json({ error: "Invalid referral code." });
-      if (referrerClaim.email === sanitizedEmail) return res.status(400).json({ error: "Self-referral check failed." });
-
-      referrerRecord = referrerClaim;
-
-      const { data: alreadyReferred } = await supabase
-        .from("syntrix_referrals")
-        .select("id")
-        .eq("referred_email", sanitizedEmail)
-        .maybeSingle();
-
-      if (alreadyReferred) return res.status(400).json({ error: "This email has already been referred." });
-      isReferralValid = true;
-    }
-
-    const { error: claimError } = await supabase
-      .from("syntrix_claims")
-      .insert([{
-        email: sanitizedEmail,
-        amount_rewarded: surveyReward,
-        status: "pending",
-        referral_code: generatedReferralCode,
-        survey_data: survey_data,
-        survey_duration_seconds: actualDuration,
-        persona_badge: persona_badge || "Analyzer",
-        selfie_verified: selfie_verified || false,
-        selfie_consent: selfie_consent || false,
-        selfie_asset_url: selfie_asset_url || null
-      }]);
-
-    if (claimError) return res.status(500).json({ error: "Claims Registry Failure: " + claimError.message });
-
-    // Credit user's balance
-    const { data: userData } = await supabase
-      .from("users")
-      .select("synx_balance, pendingRewards")
-      .eq("email", sanitizedEmail)
-      .single();
-
-    if (userData) {
-      await supabase.from("users").update({
-        synx_balance: (userData.synx_balance || 0) + surveyReward,
-        pendingRewards: (userData.pendingRewards || 0) + surveyReward,
-        has_completed_survey: true
-      }).eq("email", sanitizedEmail);
-    }
-
-    await awardXP(supabase, sanitizedEmail, 300, "Survey Completed", "survey");
-
-    if (isReferralValid && referrerRecord) {
-      const claimToken = crypto.randomBytes(32).toString('hex');
-      await supabase.from("syntrix_referrals").insert([{
-        referrer_email: referrerRecord.email, referred_email: sanitizedEmail, referral_code: normalizeReferralCode(referredBy), reward_amount: 10, status: "pending", claim_token: claimToken
-      }]);
-
-      await supabase.from("syntrix_rewards").insert([{
-        email: referrerRecord.email, reward_type: "referral", amount: 10, status: "pending", claim_token: claimToken
-      }]);
-
-      await awardXP(supabase, referrerRecord.email, 120, "Referral Success", "referral");
-      await sendRewardNotification(referrerRecord.email, 10, claimToken);
-    }
-
-    return res.json({
-      success: true,
-      referralCode: generatedReferralCode,
-      rewarded: surveyReward,
-      message: "Survey data successfully stored."
-    });
-
-  } catch (err) {
-    return res.status(500).json({ error: err.message || "Internal server error" });
-  }
-});
-
-// ================= PROFILE & DASHBOARD LOOKUPS =================
-app.get("/api/user-status", async (req, res) => {
-  const { email } = req.query;
-  if (!email) return res.status(400).json({ error: "Email parameter required" });
-
-  try {
-    const sanitizedEmail = email.trim().toLowerCase();
-    // RATE LIMIT DAILY LOGIN XP TO ONCE PER 24 HOURS
-    const { data: userRecord } = await supabase.from("users").select("last_login").eq("email", sanitizedEmail).maybeSingle();
-    const now = Date.now();
-    const twentyFourHours = 24 * 60 * 60 * 1000;
-    
-    // Only award XP if no last_login exists, or if it has been more than 24 hours
-    if (!userRecord || !userRecord.last_login || (now - new Date(userRecord.last_login).getTime()) > twentyFourHours) {
-        await awardXP(supabase, sanitizedEmail, 10, "Daily Login", "login");
-        await supabase.from("users").update({ last_login: new Date().toISOString() }).eq("email", sanitizedEmail);
-    }
-
-    const { data: userProfile, error } = await supabase
-      .from("syntrix_claims")
-      .select("email, status, wallet_address, tx_hash, referral_code, amount_rewarded, assigned_badge")
-      .eq("email", sanitizedEmail)
-      .maybeSingle();
-
-    if (error) return res.status(500).json({ error: error.message });
-
-    const { count: totalReferrals } = await supabase
-      .from("syntrix_referrals")
-      .select("id", { count: "exact", head: true })
-      .eq("referrer_email", sanitizedEmail);
-
-    const { data: rewards } = await supabase.from("syntrix_rewards").select("amount, status").eq("email", sanitizedEmail);
-    const { data: userTableRecord } = await supabase.from("users").select("pendingRewards, claimedRewards").eq("email", sanitizedEmail).maybeSingle();
-    const { data: queuedItems } = await supabase.from("syntrix_payout_queue").select("status, tx_hash").eq("email", sanitizedEmail).order("id", { ascending: false }).limit(1).maybeSingle();
-
-    let pendingRewards = 0, claimedRewards = 0;
-    const surveyAmount = userProfile ? (userProfile.amount_rewarded || 48) : 48;
-
-    if (userProfile) {
-      if (userProfile.status === "pending" || userProfile.status === "processing") pendingRewards += Number(surveyAmount);
-      else if (userProfile.status === "success") claimedRewards += Number(surveyAmount);
-    }
-
-    if (rewards) {
-      rewards.forEach(r => {
-        if (r.status === "pending" || r.status === "processing") pendingRewards += Number(r.amount);
-        if (r.status === "claimed") claimedRewards += Number(r.amount);
-      });
-    }
-
-    if (userTableRecord) {
-      pendingRewards += Number(userTableRecord.pendingRewards || 0);
-      claimedRewards += Number(userTableRecord.claimedRewards || 0);
-    }
-
-    if (!userProfile) return res.json({ success: false, exists: false, isClaimed: false, status: "FLOW_C" });
-
-    const isClaimed = userProfile.status === "success" || !!(userProfile.tx_hash || userProfile.wallet_address) || (queuedItems && queuedItems.status === "success");
-
-    return res.json({
-      success: true,
-      exists: true,
-      isClaimed: isClaimed,
-      status: isClaimed ? "completed" : "verified",
-      referralsCount: totalReferrals || 0,
-      pendingRewards,
-      claimedRewards,
-      referralCode: userProfile.referral_code || null,
-      txHash: userProfile.tx_hash || (queuedItems ? queuedItems.tx_hash : null),
-      walletAddress: userProfile.wallet_address || null,
-      badge: userProfile.assigned_badge || "Analyzer"
-    });
-
-  } catch (err) {
-    return res.status(500).json({ error: err.message }); // FIX: Passes the exact Brevo error to the frontend UI
-  }
-});
-
-// ================= CLAIM DETAILS LOOKUP =================
-app.get("/api/claim-details", async (req, res) => {
-  const { token } = req.query;
-  if (!token) return res.status(400).json({ error: "Claim token parameter required." });
-
-  try {
-    const { data: reward, error } = await supabase
-      .from("syntrix_rewards")
-      .select("email, amount, reward_type, status")
-      .eq("claim_token", token.trim())
-      .maybeSingle();
-
-    if (error || !reward) return res.status(404).json({ error: "Invalid claim token or reward record not found." });
-
-    return res.json({
-      success: true, email: reward.email, amount: reward.amount, type: reward.reward_type, status: reward.status
-    });
-  } catch (err) {
-    return res.status(500).json({ error: "Internal server error reading token properties." });
-  }
-});
-
-// ================= CRYPTOGRAPHIC QUEUE INGESTION ENDPOINT =================
-app.post("/api/execute-claim", async (req, res) => {
-  const { token, walletAddress, signature } = req.body;
-
-  if (!token || !walletAddress || !signature) return res.status(400).json({ error: "Token, wallet address, and cryptographic signature verification required." });
-  if (!ethers.isAddress(walletAddress)) return res.status(400).json({ error: "Invalid target wallet address format." });
-
-  try {
-    const sanitizedWallet = walletAddress.trim().toLowerCase();
-
-    const { data: rewardRecord, error: fetchErr } = await supabase
-      .from("syntrix_rewards")
-      .select("id, email, amount, status, reward_type")
-      .eq("claim_token", token.trim())
-      .maybeSingle();
-
-    if (fetchErr || !rewardRecord) return res.status(404).json({ error: "Claim token invalid or not found." });
-    if (rewardRecord.status !== "pending") return res.status(400).json({ error: `Reward claim has already been marked as ${rewardRecord.status}.` });
-
-    const email = rewardRecord.email.trim().toLowerCase();
-
-    const { data: walletMap } = await supabase.from("syntrix_wallets").select("email").eq("wallet_address", sanitizedWallet).maybeSingle();
-    if (walletMap && walletMap.email !== email) return res.status(400).json({ error: "This wallet is already linked to another account." });
-
-    const { data: emailMap } = await supabase.from("syntrix_wallets").select("wallet_address").eq("user_email", email).maybeSingle();
-    if (emailMap && emailMap.wallet_address.toLowerCase() !== sanitizedWallet) return res.status(400).json({ error: `This email is already associated with a different wallet address: ${emailMap.wallet_address}` });
-
-    try {
-      const message = `Authenticating Token Core distribution protocols on email registry node: ${email}`;
-      const signerAddress = ethers.verifyMessage(message, signature);
-      if (signerAddress.toLowerCase() !== sanitizedWallet) return res.status(400).json({ error: "Cryptographic wallet signature validation failed." });
-    } catch (sigErr) {
-      return res.status(400).json({ error: "Signature verification processing error: " + sigErr.message });
-    }
-
-    const { data: itemInQueue } = await supabase.from("syntrix_payout_queue").select("id").eq("claim_token", token.trim()).maybeSingle();
-    if (itemInQueue) return res.status(400).json({ error: "This distribution request is already queued for processing." });
-
-    await supabase.from("syntrix_payout_queue").insert([{
-      email: email, wallet_address: sanitizedWallet, reward_amount: Number(rewardRecord.amount), claim_token: token.trim(), status: "queued"
-    }]);
-
-    await supabase.from("syntrix_rewards").update({ status: "processing" }).eq("id", rewardRecord.id);
-    if (!emailMap) await supabase.from("syntrix_wallets").upsert({ email: email, wallet_address: sanitizedWallet });
-
-    return res.json({ success: true, message: "Claim safely routed to blockchain transactional queue buffers." });
-
-  } catch (err) {
-    return res.status(500).json({ error: "Fulfillment ingestion failed: " + err.message });
-  }
-});
-
-// ================= LAZY SURVEY CLAIM DISPENSER =================
-app.post("/api/claim-reward", async (req, res) => {
-  const { email, walletAddress } = req.body;
-  if (!email || !walletAddress) return res.status(400).json({ error: "Email and destination wallet address are required." });
-  if (!ethers.isAddress(walletAddress)) return res.status(400).json({ error: "Invalid target wallet address string." });
-
-  try {
-    const sanitizedEmail = email.trim().toLowerCase();
-    const sanitizedWallet = walletAddress.trim().toLowerCase();
-
-    const { data: userRecord } = await supabase.from("syntrix_claims").select("id, status, tx_hash, amount_rewarded").eq("email", sanitizedEmail).maybeSingle();
-    if (!userRecord) return res.status(404).json({ error: "User survey verification profile not found." });
-    if (userRecord.status === "success" || userRecord.tx_hash) return res.status(400).json({ error: "Rewards have already been successfully distributed to this email." });
-
-    const { data: walletMap } = await supabase.from("syntrix_wallets").select("email").eq("wallet_address", sanitizedWallet).maybeSingle();
-    if (walletMap && walletMap.email !== sanitizedEmail) return res.status(400).json({ error: "This wallet is already linked to another account." });
-
-    const { data: emailMap } = await supabase.from("syntrix_wallets").select("wallet_address").eq("email", sanitizedEmail).maybeSingle();
-    if (emailMap && emailMap.wallet_address.toLowerCase() !== sanitizedWallet) return res.status(400).json({ error: `This email is already associated with a different wallet address: ${emailMap.wallet_address}` });
-
-    const { data: duplicateWallet } = await supabase.from("syntrix_claims").select("id").eq("wallet_address", sanitizedWallet).maybeSingle();
-    if (duplicateWallet) return res.status(400).json({ error: "This wallet address has already been used to claim a survey reward." });
-
-    const rewardAmount = userRecord.amount_rewarded || 48;
-    await supabase.from("syntrix_payout_queue").insert([{
-      email: sanitizedEmail, wallet_address: sanitizedWallet, reward_amount: rewardAmount, claim_token: `SURVEY-LAZY-${crypto.randomBytes(8).toString('hex').toUpperCase()}`, status: "queued"
-    }]);
-
-    await supabase.from("syntrix_claims").update({ status: "processing" }).eq("id", userRecord.id);
-
-    return res.json({ success: true, message: "Lazy reward request appended to processing queues." });
-  } catch (err) {
-    return res.status(500).json({ error: err.message || "Smart contract claim execution pipeline blocked." });
-  }
-});
-
-// ================= THE BACKGROUND BLOCKCHAIN TRANSACTION QUEUE ENGINE =================
-let isQueueProcessing = false;
-
-async function processPayoutQueueEngine() {
-  if (isQueueProcessing) return;
-  isQueueProcessing = true;
-
-  try {
-    const { data: queueJob, error } = await supabase.from("syntrix_payout_queue")
-      .select("*")
-      .eq("status", "queued")
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (error) throw error;
-    if (!queueJob) {
-      isQueueProcessing = false;
-      return;
-    }
-
-    console.log(`[QUEUE ENGINE] Processing job ID ${queueJob.id} for target recipient: ${queueJob.email}`);
-
-    await supabase.from("syntrix_payout_queue").update({ status: "processing" }).eq("id", queueJob.id);
-
-    if (!tokenContract) {
-      const mockTxHash = "0x" + crypto.randomBytes(32).toString("hex");
-      await finalizeSuccessfulQueueJob(queueJob, mockTxHash);
-      isQueueProcessing = false;
-      return;
-    }
-
-    try {
-      const decimals = await tokenContract.decimals();
-      const amount = ethers.parseUnits(queueJob.reward_amount.toString(), decimals);
-
-      const tx = await tokenContract.transfer(queueJob.wallet_address, amount);
-      console.log(`[QUEUE ENGINE] Broadcasted transaction on-chain: ${tx.hash}.`);
-
-      await supabase.from("syntrix_payout_queue").update({
-        status: "processing",
-        tx_hash: tx.hash
-      }).eq("id", queueJob.id);
-
-      await finalizeSuccessfulQueueJob(queueJob, tx.hash);
-
-    } catch (blockchainError) {
-      console.error(`[QUEUE ENGINE ERROR] Processing failure encountered on task ID ${queueJob.id}:`, blockchainError.message);
-
-      await supabase.from("syntrix_payout_queue").update({
-        status: "failed",
-        error_message: blockchainError.message,
-        processed_at: new Date().toISOString()
-      }).eq("id", queueJob.id);
-
-      if (queueJob.claim_token.startsWith("SURVEY-LAZY-")) {
-        await supabase.from("syntrix_claims").update({ status: "pending" }).eq("email", queueJob.email);
-      } else {
-        await supabase.from("syntrix_rewards").update({ status: "pending" }).eq("claim_token", queueJob.claim_token);
-      }
-    }
-
-  } catch (engineError) {
-    console.error("[QUEUE ENGINE CORE FAILURE]:", engineError.message);
-  } finally {
-    isQueueProcessing = false;
-  }
-}
-
-async function finalizeSuccessfulQueueJob(job, txHash) {
-  await supabase.from("syntrix_payout_queue").update({
-    status: "success", tx_hash: txHash, processed_at: new Date().toISOString()
-  }).eq("id", job.id);
-
-  if (job.claim_token.startsWith("SURVEY-LAZY-")) {
-    await supabase.from("syntrix_claims").update({ wallet_address: job.wallet_address, tx_hash: txHash, status: "success" }).eq("email", job.email);
-  } else {
-    await supabase.from("syntrix_rewards").update({ tx_hash: txHash, claimed_wallet: job.wallet_address, claimed_at: new Date().toISOString(), status: "claimed" }).eq("claim_token", job.claim_token);
-    await supabase.from("syntrix_referrals").update({ status: "claimed" }).eq("claim_token", job.claim_token);
-    await supabase.from("syntrix_claims").update({ wallet_address: job.wallet_address, tx_hash: txHash, status: "success" }).eq("email", job.email);
-  }
-  console.log(`[QUEUE ENGINE] Successfully processed and finalized payout records for: ${job.email}`);
-}
-
-setInterval(addUniqueThreadGuard, 15000);
-function addUniqueThreadGuard() {
-  processPayoutQueueEngine().catch(err => console.error("Thread system leak caught:", err.message));
-}
-
-// ================= UI POLLING ENDPOINT =================
-app.get("/api/check-submission", async (req, res) => {
-  const email = req.query.email || req.body?.email || req.query.userEmail;
-  if (!email) return res.status(400).json({ error: "Email required" });
-
+app.get("/api/admin/submissions", verifyAdminAccess, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("upload_jobs")
-      .select("status, reason")
-      .eq("user_email", email.trim().toLowerCase())
+      .select("*")
       .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (error) return res.status(500).json({ error: error.message });
-    return res.json({ success: true, submission: data });
-  } catch (err) {
-    return res.status(500).json({ error: err.message }); // FIX: Passes the exact Brevo error to the frontend UI
-  }
-});
-
-// Helper: Extract and decode relative storage path from Supabase Public URL
-function getBucketFilePathFromUrl(publicUrl) {
-  if (!publicUrl) return null;
-  const parts = publicUrl.split("/verified_assets/");
-  return parts.length > 1 ? decodeURIComponent(parts[1]) : null;
-}
-
-// ================= BACKEND-INTERCEPT BUCKET UPLOAD =================
-app.post("/api/upload-task", async (req, res) => {
-  const { email, userEmail, taskType, fileName, imageBase64, contentTags, assignedTask } = req.body;
-  const actualEmail = userEmail || email;
-
-  if (!actualEmail || !taskType || !fileName || !imageBase64) {
-    return res.status(400).json({ error: "Missing required document fields." });
-  }
-
-  const sanitizedEmail = actualEmail.trim().toLowerCase();
-  const lastDot = fileName.lastIndexOf(".");
-      let safeFileName;
-      if (lastDot !== -1) {
-        const namePart = fileName.substring(0, lastDot).replace(/[^a-zA-Z0-9\-_]/g, "_");
-        const extPart = fileName.substring(lastDot + 1).replace(/[^a-zA-Z0-9]/g, "");
-        safeFileName = namePart + "." + extPart;
-      } else {
-        safeFileName = fileName.replace(/[^a-zA-Z0-9\-_]/g, "_") + ".jpeg";
-      }
-
-  // STRICT 24-HOUR LIMITER FOR SELFIES (Testing Mode)
-  if (taskType === 'selfie') {
-    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const { data: recentSelfie } = await supabase
-      .from("upload_jobs").select("id").eq("user_email", sanitizedEmail).eq("task_type", "selfie").gte("created_at", oneDayAgo).in("status", ["VERIFIED"]).limit(1);
-
-    if (recentSelfie && recentSelfie.length > 0) {
-      return res.status(429).json({ error: "Task currently pending or daily limit reached. Please wait 24 hours after a successful verification." });
-    }
-  }
-
-  try {
-    const base64Data = imageBase64.replace(/^data:(image|application)\/\w+;base64,/, "");
-    const buffer = Buffer.from(base64Data, "base64");
-    const imageHash = crypto.createHash("sha256").update(buffer).digest("hex");
-
-    // DIVERSIFIED STORAGE PATH: Isolate selfies from documents
-    const folderCategory = taskType === 'selfie' ? 'selfies' : 'documents';
-    const storagePath = `pending/${sanitizedEmail}/${folderCategory}/${Date.now()}_${safeFileName}`;
-    
-    const { error: uploadError } = await supabase.storage
-      .from("verified_assets")
-      .upload(storagePath, buffer, { contentType: "image/jpeg" });
-
-    if (uploadError) throw new Error("Bucket upload failed: " + uploadError.message);
-
-    const { data: publicUrlData } = supabase.storage.from("verified_assets").getPublicUrl(storagePath);
-
-    // CRITICAL FIX: Insert parent batch using correct schema and let Supabase generate the ID
-    const { data: batchData, error: batchErr } = await supabase.from('upload_batches').insert([{
-        user_email: sanitizedEmail,
-        total_jobs: 1,
-        completed_jobs: 0,
-        status: 'PROCESSING'
-    }]).select('id').single();
-
-    if (batchErr || !batchData) {
-        throw new Error("Failed to create parent batch: " + (batchErr ? batchErr.message : "No batch data returned"));
-    }
-
-    const { error: dbError } = await supabase.from("upload_jobs").insert([{
-      batch_id: batchData.id,
-      user_email: sanitizedEmail,
-      task_type: taskType,
-      file_name: safeFileName,
-      storage_url: publicUrlData.publicUrl,
-      file_hash: imageHash,
-      status: "QUEUED",
-      content_tags: contentTags || ["none"],
-      assigned_task: assignedTask || null
-    }]);
-
-    if (dbError) throw dbError;
-
-    res.json({ success: true, message: "Queued for AI Verification" });
-    
-    // Auto-wake the worker in the background (Fire and Forget)
-    try {
-        const host = req.headers['x-forwarded-host'] || req.get('host');
-        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-        const fetchUrl = `${protocol}://${host}/api/process-queue`;
-        fetch(fetchUrl, {
-            method: "POST",
-            headers: { "x-admin-key": process.env.ADMIN_SECRET_KEY }
-        }).catch(e => {}); // Silent catch for background task
-    } catch(e) {}
-    
-  } catch (err) {
-    return res.status(500).json({ error: "Ingestion failed: " + err.message });
-  }
-});
-
-// =========================================================================
-// RENDER SLEEP STARTUP RECOVERY & NEW WORKER ENGINE (PHASE 2)
-// =========================================================================
-(async function startupRecovery() {
-    console.log("[SYSTEM] Running startup recovery hook...");
-    try {
-        const { data, error } = await supabase
-            .from("upload_jobs")
-            .update({ status: "QUEUED", reason: "Recovered from stale server sleep/crash", assigned_key: null })
-            .eq("status", "PROCESSING");
-        if (error) console.error("[SYSTEM] Recovery error:", error.message);
-        else console.log("[SYSTEM] Cleared stale PROCESSING jobs.");
-    } catch (e) {
-        console.error("[SYSTEM] Startup recovery exception:", e.message);
-    }
-})();
-
-let isWorkerActive = false;
-setInterval(async () => {
-    if (isWorkerActive) return;
-    isWorkerActive = true;
-    try {
-        const adminKey = process.env.ADMIN_SECRET_KEY;
-        if (!adminKey) return;
-        const PORT = process.env.PORT || 5000;
-        
-        const fetchUrl = "http://localhost:" + PORT + "/api/process-queue";
-        const res = await fetch(fetchUrl, {
-            method: "POST",
-            headers: { "x-admin-key": adminKey }
-        });
-        
-        const data = await res.json();
-        if (data && data.processed > 0) {
-            console.log("[QUEUE] Processed " + data.processed + " jobs successfully.");
-        }
-    } catch (e) {
-        console.error("[WORKER ERROR] Background loop failed:", e.message);
-    } finally {
-        isWorkerActive = false;
-    }
-}, 5000);
-
-app.post("/api/public-wake", async (req, res) => {
-    const host = req.headers['x-forwarded-host'] || req.get('host');
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const fetchUrl = `${protocol}://${host}/api/process-queue`;
-    
-    fetch(fetchUrl, {
-        method: "POST",
-        headers: { "x-admin-key": process.env.ADMIN_SECRET_KEY }
-    }).catch(e => console.log("Wake error:", e.message));
-    
-    res.json({ success: true, message: "AI Worker signaled." });
-});
-
-app.post("/api/admin/queue/wake", async (req, res) => {
-    const adminKey = req.headers["x-admin-key"];
-    if (!process.env.ADMIN_SECRET_KEY || adminKey !== process.env.ADMIN_SECRET_KEY) {
-        return res.status(403).json({ success: false, error: "Unauthorized" });
-    }
-    const PORT = process.env.PORT || 5000;
-    const fetchUrl = "http://127.0.0.1:" + PORT + "/api/process-queue";
-    
-    fetch(fetchUrl, {
-        method: "POST",
-        headers: { "x-admin-key": adminKey }
-    }).catch(function(e){});
-    
-    res.json({ success: true, message: "Worker awakened and queue triggered." });
-});
-
-// ================= XP PROFILE =================
-app.get("/api/xp-profile", async (req, res) => {
-  const { email } = req.query;
-  if (!email) return res.status(400).json({ error: "Email parameter required" });
-  try {
-    const profile = await getXPProfile(supabase, email);
-    return res.json({ success: true, profile });
-  } catch (err) {
-    return res.status(500).json({ error: err.message }); // FIX: Passes the exact Brevo error to the frontend UI
-  }
-});
-
-// =========================================================================
-// GOD MODE: SECURE ADMIN PANEL ROUTES
-// =========================================================================
-
-// -- Admin Auth Middleware --
-// Reads x-admin-key header and validates against ADMIN_SECRET_KEY env var.
-// Protects all /api/admin/* routes except /api/admin/login.
-function verifyAdminAccess(req, res, next) {
-  var adminKey = req.headers['x-admin-key'];
-  var correctKey = process.env.ADMIN_SECRET_KEY;
-
-  if (!correctKey) {
-    return res.status(500).json({
-      success: false,
-      error: "Admin secret key not configured on server."
-    });
-  }
-
-  if (!adminKey || adminKey !== correctKey) {
-    return res.status(403).json({
-      success: false,
-      error: "Forbidden: Invalid or missing admin key."
-    });
-  }
-
-  next();
-}
-
-// -- POST /api/admin/login --
-// Checks password against ADMIN_SECRET_KEY and returns it as a session token.
-app.post("/api/admin/login", function(req, res) {
-  try {
-    var password = (req.body.password || '').trim();
-
-    if (!password) {
-      return res.status(400).json({
-        success: false,
-        error: 'Password is required.'
-      });
-    }
-
-    if (password !== process.env.ADMIN_SECRET_KEY) {
-      return res.status(401).json({
-        success: false,
-        error: 'Authentication denied. Invalid credentials.'
-      });
-    }
-
-    return res.json({
-      success: true,
-      token: password
-    });
-
-  } catch (err) {
-    console.error('[ADMIN LOGIN ERROR]', err.message);
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error during authentication.'
-    });
-  }
-});
-
-// -- GET /api/admin/stats --
-// Returns aggregate counts for the admin dashboard Bento grid.
-// Tables: syntrix_submissions, users (with pendingRewards column).
-app.get("/api/admin/stats", verifyAdminAccess, async function(req, res) {
-  try {
-    // Total unique users
-    var usersResult = await supabase
-      .from('users')
-      .select('id', { count: 'exact', head: true });
-    var totalUsers = (usersResult.count !== null && usersResult.count !== undefined)
-      ? usersResult.count
-      : 0;
-
-    // Total submissions
-    var totalResult = await supabase
-      .from('syntrix_submissions')
-      .select('id', { count: 'exact', head: true });
-    var totalSubmissions = (totalResult.count !== null && totalResult.count !== undefined)
-      ? totalResult.count
-      : 0;
-
-    // Pending submissions
-    var pendingResult = await supabase
-      .from('syntrix_submissions')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'pending');
-    var pendingSubmissions = (pendingResult.count !== null && pendingResult.count !== undefined)
-      ? pendingResult.count
-      : 0;
-
-    // Total SYNX tokens distributed (from users.pendingRewards)
-    var tokensResult = await supabase
-      .from('users')
-      .select('pendingRewards');
-    var totalTokens = 0;
-    if (tokensResult.data && tokensResult.data.length > 0) {
-      totalTokens = tokensResult.data.reduce(function(sum, row) {
-        return sum + (Number(row.pendingRewards) || 0);
-      }, 0);
-    }
-
-    return res.json({
-      success: true,
-      stats: {
-        totalUsers: totalUsers,
-        totalSubmissions: totalSubmissions,
-        pendingSubmissions: pendingSubmissions,
-        totalTokens: totalTokens
-      }
-    });
-
-  } catch (err) {
-    console.error('[ADMIN STATS ERROR]', err.message);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch stats: ' + err.message
-    });
-  }
-});
-
-// -- GET /api/admin/submissions --
-// Returns the latest 50 submissions ordered by creation date.
-app.get("/api/admin/submissions", verifyAdminAccess, async function(req, res) {
-  try {
-    var result = await supabase
-      .from('syntrix_submissions')
-      .select('id, email, task_type, status, reason, storage_url, created_at')
-      .order('created_at', { ascending: false })
       .limit(50);
 
-    if (result.error) {
-      throw new Error(result.error.message);
-    }
-
-    return res.json({
-      success: true,
-      submissions: result.data || []
-    });
-
+    if (error) throw error;
+    return res.status(200).json({ success: true, submissions: data });
   } catch (err) {
-    console.error('[ADMIN SUBMISSIONS ERROR]', err.message);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch submissions: ' + err.message
-    });
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// -- POST /api/admin/override --
-// Force-updates a submission status and reason (God Mode approve/reject).
-app.post("/api/admin/override", verifyAdminAccess, async function(req, res) {
+app.post("/api/admin/override", verifyAdminAccess, async (req, res) => {
   try {
-    var id = req.body.id;
-    var newStatus = req.body.newStatus;
-    var reason = req.body.reason || 'Manual override via God Mode';
+    const { jobId, newStatus, reason } = req.body;
+    if (!jobId || !newStatus) return res.status(400).json({ success: false, error: "jobId and newStatus required" });
 
-    if (!id || !newStatus) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: id and newStatus.'
-      });
-    }
+    const { data, error } = await supabase
+      .from("upload_jobs")
+      .update({ status: newStatus, reason: reason || "Manual admin override." })
+      .eq("id", jobId)
+      .select()
+      .single();
 
-    // Validate that newStatus is an expected value
-    var allowedStatuses = ['verified', 'rejected', 'pending'];
-    if (allowedStatuses.indexOf(newStatus) === -1) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid status. Allowed: verified, rejected, pending.'
-      });
-    }
-
-    var result = await supabase
-      .from('syntrix_submissions')
-      .update({
-        status: newStatus,
-        reason: reason
-      })
-      .eq('id', id);
-
-    if (result.error) {
-      throw new Error(result.error.message);
-    }
-
-    console.log('[ADMIN OVERRIDE] Task ' + id + ' -> ' + newStatus);
-
-    return res.json({
-      success: true,
-      message: 'Submission ' + id + ' updated to ' + newStatus + '.'
-    });
-
+    if (error) throw error;
+    return res.status(200).json({ success: true, job: data });
   } catch (err) {
-    console.error('[ADMIN OVERRIDE ERROR]', err.message);
-    return res.status(500).json({
-      success: false,
-      error: 'Override failed: ' + err.message
-    });
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ===================== SERVER INITIALIZATION ===============================
+app.post("/api/test-email", verifyAdminAccess, async (req, res) => {
+  const { to } = req.body;
+  const sent = await sendEmailHTTP({
+    to: to || "test@syntrix.io",
+    subject: "Brevo API Configuration Test",
+    htmlContent: "<h1>Brevo Integration Operational</h1>"
+  });
+  return res.json({ success: sent });
+});
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bound to 0.0.0.0`));
+// ================= PUBLIC WORKER WAKE TRIGGER =================
+let lastWakeTriggerTime = 0;
+const WAKE_COOLDOWN_MS = 5000;
 
-// =====================================================================
-// QUEUE AUTO-POLLER (SAFE HEARTBEAT)
-// Automatically triggers the queue, but waits if a heavy batch is running
-// =====================================================================
+app.post("/api/public-wake", (req, res) => {
+  const now = Date.now();
+  if (now - lastWakeTriggerTime < WAKE_COOLDOWN_MS) {
+    return res.status(200).json({
+      success: true,
+      message: "Queue processor already active or triggered recently."
+    });
+  }
+  lastWakeTriggerTime = now;
+
+  triggerQueueProcessor();
+  return res.status(200).json({ success: true, message: "Queue processor awakened." });
+});
+
+// ================= INTERNAL QUEUE TRIGGER FUNCTION =================
 let isQueueRunning = false;
 
-setInterval(async () => {
-  // If the previous job is still running, skip this heartbeat to prevent overlapping timeouts
-  if (isQueueRunning) return; 
-  
-  const adminKey = process.env.ADMIN_SECRET_KEY;
-  const port = process.env.PORT || 5000;
-  
-  if (adminKey) {
-    isQueueRunning = true; // Lock the queue
-    try {
-      await fetch(`http://localhost:${port}/api/process-queue`, {
-        method: 'POST',
-        headers: { 'x-admin-key': adminKey }
-      });
-    } catch (err) {
-      // Silent catch to prevent console spam
-    } finally {
-      isQueueRunning = false; // Unlock the queue when finished
+async function triggerQueueProcessor() {
+  if (isQueueRunning) return;
+  isQueueRunning = true;
+  try {
+    const processor = processQueueRouter.processQueueDirectly;
+    if (typeof processor === "function") {
+      await processor(supabase, sendEmailHTTP);
     }
+  } catch (err) {
+    console.error("[INTERNAL_QUEUE] Queue tick error:", err.message);
+  } finally {
+    isQueueRunning = false;
   }
-}, 10000); // Checks every 10 seconds safely
+}
 
+// ================= STARTUP INTEGRITY SWEEP & BACKGROUND DAEMON =================
+async function startupQueueRecovery() {
+  try {
+    const { data, error } = await supabase
+      .from("upload_jobs")
+      .update({
+        status: "QUEUED",
+        locked_by: null,
+        locked_at: null,
+        lease_expires_at: null,
+        reason: "Reset to QUEUED on server initialization."
+      })
+      .eq("status", "PROCESSING")
+      .select("id");
 
+    if (!error && data && data.length > 0) {
+      console.log(`[STARTUP] Reclaimed ${data.length} stale PROCESSING jobs back to QUEUED.`);
+    }
+  } catch (e) {
+    console.error("[STARTUP] Queue recovery check failed:", e.message);
+  }
+}
 
+// Poller runs every 15 seconds
+setInterval(() => {
+  triggerQueueProcessor();
+}, 15000);
 
+// Background Polygon Payout Engine
+async function processPayoutQueueEngine() {
+  if (!tokenContract || !wallet) return;
 
+  try {
+    const { data: pendingPayouts, error } = await supabase
+      .from("syntrix_payout_queue")
+      .select("*")
+      .eq("status", "queued")
+      .limit(5);
 
+    if (error || !pendingPayouts || pendingPayouts.length === 0) return;
 
+    for (const payout of pendingPayouts) {
+      try {
+        const decimals = await tokenContract.decimals();
+        const amountWei = ethers.parseUnits(payout.reward_amount.toString(), decimals);
 
+        const tx = await tokenContract.transfer(payout.wallet_address, amountWei);
+        await tx.wait(1);
 
+        await supabase
+          .from("syntrix_payout_queue")
+          .update({ status: "completed", tx_hash: tx.hash, processed_at: new Date().toISOString() })
+          .eq("id", payout.id);
 
+        await supabase
+          .from("syntrix_rewards")
+          .update({ status: "claimed", tx_hash: tx.hash, claimed_at: new Date().toISOString() })
+          .eq("claim_token", payout.claim_token);
 
+        console.log(`[PAYOUT] Executed ${payout.reward_amount} SYNX to ${payout.wallet_address}. Tx: ${tx.hash}`);
+      } catch (txErr) {
+        console.error(`[PAYOUT_ERROR] Failed tx for payout ${payout.id}:`, txErr.message);
+        await supabase
+          .from("syntrix_payout_queue")
+          .update({ status: "failed", error_message: txErr.message })
+          .eq("id", payout.id);
+      }
+    }
+  } catch (loopErr) {
+    console.error("[PAYOUT_ENGINE] Loop exception:", loopErr.message);
+  }
+}
 
+setInterval(() => {
+  processPayoutQueueEngine();
+}, 30000);
 
+// ================= HEALTH CHECK & SERVER LAUNCH =================
+app.get("/", (req, res) => {
+  res.status(200).json({
+    status: "operational",
+    service: "Syntrix Network Decentralized Engine",
+    version: "3.2.0-staging",
+    timestamp: new Date().toISOString()
+  });
+});
 
-
-
-
-
-
-
-
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, async () => {
+  console.log(`Syntrix High-Performance Engine listening on port ${PORT}`);
+  await startupQueueRecovery();
+});
