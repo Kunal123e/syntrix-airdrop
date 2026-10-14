@@ -682,22 +682,37 @@ async function processPayoutQueueEngine() {
   isQueueProcessing = true;
 
   try {
-    const { data: queueJob, error } = await supabase.from("syntrix_payout_queue")
-      .select("*")
-      .eq("status", "queued")
+    // 1. Fetch oldest pending/queued transaction
+    const { data: pendingTxs, error } = await supabase
+      .from("syntrix_payout_queue")
+      .select("id")
+      .or("status.eq.queued,status.eq.PENDING,status.eq.pending")
       .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
+      .limit(1);
 
-    if (error) throw error;
-    if (!queueJob) {
+    if (error || !pendingTxs || pendingTxs.length === 0) {
       isQueueProcessing = false;
       return;
     }
+    const targetId = pendingTxs[0].id;
+
+    // 2. Optimistic Atomic Lock: Only claim if it is STILL pending/queued
+    const { data: lockedTxs, error: lockErr } = await supabase
+      .from("syntrix_payout_queue")
+      .update({ status: "processing" })
+      .eq("id", targetId)
+      .in("status", ["queued", "PENDING", "pending"])
+      .select("*");
+
+    if (lockErr || !lockedTxs || lockedTxs.length === 0) {
+      isQueueProcessing = false;
+      return; // Another worker instance already grabbed this transaction
+    }
+
+    const payout = lockedTxs[0];
+    const queueJob = payout;
 
     console.log(`[QUEUE ENGINE] Processing job ID ${queueJob.id} for target recipient: ${queueJob.email}`);
-
-    await supabase.from("syntrix_payout_queue").update({ status: "processing" }).eq("id", queueJob.id);
 
     if (!tokenContract) {
       const mockTxHash = "0x" + crypto.randomBytes(32).toString("hex");
@@ -762,6 +777,7 @@ setInterval(addUniqueThreadGuard, 15000);
 function addUniqueThreadGuard() {
   processPayoutQueueEngine().catch(err => console.error("Thread system leak caught:", err.message));
 }
+const processPayoutQueue = processPayoutQueueEngine;
 
 // ================= UI POLLING ENDPOINT =================
 app.get("/api/check-submission", async (req, res) => {
