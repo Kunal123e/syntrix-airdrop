@@ -129,9 +129,18 @@ async function getAvailableKey(supabase, taskType) {
     }
   }
 
-  // Global Fallback
+  // Global Fallback: check GEMINI_API_KEY
   if (process.env.GEMINI_API_KEY && !isKeyOnCooldown("GEMINI_API_KEY")) {
     return "GEMINI_API_KEY";
+  }
+
+  // Cross-pool fallback: check other pool keys if primary pool is empty or cooling down
+  const crossPool = isSelfie ? DOC_KEY_NAMES : SELFIE_KEY_NAMES;
+  for (let i = 0; i < crossPool.length; i++) {
+    const candidate = crossPool[i];
+    if (process.env[candidate] && !isKeyOnCooldown(candidate)) {
+      return candidate;
+    }
   }
 
   return null;
