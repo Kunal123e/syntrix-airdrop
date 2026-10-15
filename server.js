@@ -1218,10 +1218,16 @@ setInterval(async () => {
   if (adminKey) {
     isQueueRunning = true; // Lock the queue
     try {
+      // Caller timeout (90s) is strictly longer than internal batch budget (60s AI limit)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 90000);
+
       await fetch(`http://localhost:${port}/api/process-queue`, {
         method: 'POST',
-        headers: { 'x-admin-key': adminKey }
+        headers: { 'x-admin-key': adminKey },
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
     } catch (err) {
       // Silent catch to prevent console spam
     } finally {
