@@ -1208,7 +1208,7 @@ app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bo
 // =====================================================================
 let isQueueRunning = false;
 
-setInterval(async () => {
+async function executeSafeQueuePass() {
   // If the previous job is still running, skip this heartbeat to prevent overlapping timeouts
   if (isQueueRunning) return; 
   
@@ -1234,4 +1234,6 @@ setInterval(async () => {
       isQueueRunning = false; // Unlock the queue when finished
     }
   }
-}, 10000); // Checks every 10 seconds safely
+}
+
+setInterval(executeSafeQueuePass, 10000); // Checks every 10 seconds safely
