@@ -953,19 +953,25 @@ router.post("/", async (req, res) => {
           
           if (newRetryCount >= maxRetries || isFatal) {
               // Final failure - protected by locked_by
-              await supabase.from("upload_jobs").update({
-                status: "FAILED",
-                error_code: isFatal ? "ASSET_NOT_FOUND" : "PROCESSING_ERROR",
-                reason: "System Error: " + (jobErr.message || "Unknown error"),
-                processed_at: new Date().toISOString(),
-                retry_count: newRetryCount,
-                assigned_key: null,
-                locked_by: null,
-                lease_expires_at: null
-              }).eq("id", job.id).eq("locked_by", WORKER_ID);
+              if (jobErr.errorCode === "ASSET_NOT_FOUND") {
+                  // Quietly delete the ghost job so it drops off the frontend UI
+                  await supabase.from("upload_jobs").delete().eq("id", job.id).eq("locked_by", WORKER_ID);
+                  results.push({ jobId: job.id, result: "PURGED", reason: "Missing asset row deleted" });
+              } else {
+                  await supabase.from("upload_jobs").update({
+                    status: "FAILED",
+                    error_code: isFatal ? "ASSET_NOT_FOUND" : "PROCESSING_ERROR",
+                    reason: "System Error: " + (jobErr.message || "Unknown error"),
+                    processed_at: new Date().toISOString(),
+                    retry_count: newRetryCount,
+                    assigned_key: null,
+                    locked_by: null,
+                    lease_expires_at: null
+                  }).eq("id", job.id).eq("locked_by", WORKER_ID);
 
-              if (filePath) await supabase.storage.from("verified_assets").remove([filePath]).catch(function() {});
-              results.push({ jobId: job.id, result: "FAILED", reason: jobErr.message });
+                  if (filePath) await supabase.storage.from("verified_assets").remove([filePath]).catch(function() {});
+                  results.push({ jobId: job.id, result: "FAILED", reason: jobErr.message });
+              }
           } else {
               // Safe retry with lease release and locked_by check
               await supabase.from("upload_jobs").update({
