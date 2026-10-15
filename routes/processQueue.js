@@ -668,6 +668,10 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   }
 
   // ---- 8. ATOMIC IDEMPOTENT SETTLEMENT (RPC STRICT) ----
+  var verifiedReason = isSelfie
+    ? (aiVerdict.reason || "Liveness confirmed: Authenticated user face matching assigned directive.")
+    : (aiVerdict.reason || "Document approved: Verified handwriting density and structure.");
+
   var { data: rpcSettlement, error: rpcSettlementErr } = await supabase.rpc("settle_job_reward", {
     p_job_id: job.id,
     p_user_email: job.user_email,
@@ -675,7 +679,8 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
     p_reward_amount: rewardAmount,
     p_file_hash: imageHash,
     p_final_url: finalPublicUrl,
-    p_visual_signature: aiVerdict.visual_signature || null
+    p_visual_signature: aiVerdict.visual_signature || null,
+    p_reason: verifiedReason
   });
 
   if (rpcSettlementErr) {
