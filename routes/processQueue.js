@@ -421,7 +421,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
         ],
         config: { responseMimeType: "application/json" }
       }),
-      30000,
+      60000, // Expanded to 60s to allow heavy document OCR
       "Gemini generateContent"
     );
   } catch (aiErr) {
