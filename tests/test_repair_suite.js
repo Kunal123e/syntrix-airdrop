@@ -84,22 +84,14 @@ async function main() {
   runTest("2.2 Document Policy: Individual image earns up to 20 SYNX based on rating", () => {
     function calculateDocImageReward(qualityScore) {
       if (qualityScore < 40) return { status: "REJECTED", reward: 0 };
-      if (qualityScore >= 80) return { status: "VERIFIED", reward: 20 };
-      if (qualityScore >= 60) return { status: "VERIFIED", reward: 10 };
-      return { status: "VERIFIED", reward: 4 };
+      return { status: "VERIFIED", reward: qualityScore * 0.2 };
     }
 
-    // High quality (>= 80): 20 SYNX
-    assert.deepStrictEqual(calculateDocImageReward(95), { status: "VERIFIED", reward: 20 });
-    assert.deepStrictEqual(calculateDocImageReward(80), { status: "VERIFIED", reward: 20 });
-
-    // Mid quality (60-79): 10 SYNX
-    assert.deepStrictEqual(calculateDocImageReward(75), { status: "VERIFIED", reward: 10 });
-    assert.deepStrictEqual(calculateDocImageReward(60), { status: "VERIFIED", reward: 10 });
-
-    // Low quality (40-59): 4 SYNX
-    assert.deepStrictEqual(calculateDocImageReward(55), { status: "VERIFIED", reward: 4 });
-    assert.deepStrictEqual(calculateDocImageReward(40), { status: "VERIFIED", reward: 4 });
+    // Reward is 0.2 SYNX per rating point, up to 20 SYNX.
+    assert.deepStrictEqual(calculateDocImageReward(95), { status: "VERIFIED", reward: 19 });
+    assert.deepStrictEqual(calculateDocImageReward(100), { status: "VERIFIED", reward: 20 });
+    assert.deepStrictEqual(calculateDocImageReward(75), { status: "VERIFIED", reward: 15 });
+    assert.deepStrictEqual(calculateDocImageReward(40), { status: "VERIFIED", reward: 8 });
 
     // Sub-40 (< 40): Rejected
     assert.deepStrictEqual(calculateDocImageReward(39), { status: "REJECTED", reward: 0 });
@@ -108,12 +100,12 @@ async function main() {
 
   runTest("2.3 Five-image document batch earns a maximum combined total of 100 SYNX", () => {
     // 5 files, all top quality (20 SYNX each)
-    const fiveDocScores = [85, 90, 88, 92, 80];
+    const fiveDocScores = [100, 100, 100, 100, 100];
     let batchTotal = 0;
     const batchCap = 100;
 
     const settledRewards = fiveDocScores.map(score => {
-      let baseDoc = (score >= 80) ? 20 : (score >= 60) ? 10 : 4;
+      let baseDoc = score * 0.2;
       let awarded = Math.min(baseDoc, Math.max(0, batchCap - batchTotal));
       batchTotal += awarded;
       return awarded;

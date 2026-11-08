@@ -18,6 +18,30 @@ const {
 } = require("../sessionAuth");
 const router = express.Router();
 
+function buildDocumentQualityRules(contentTags) {
+  var requiredTopics = Array.isArray(contentTags) && contentTags.length > 0
+    ? contentTags.join(", ")
+    : "academic content";
+  return "You are a STRINGENT data quality gatekeeper. Reject (a) digital screenshots of a UI or website, (b) computer- or phone-generated digital text, (c) printed textbook/book pages or PDFs, (d) random non-document photos, (e) blank or nearly blank pages, and (f) human faces, selfies, or portraits. Approve authentic photographs of physical paper with clearly visible handwriting containing " + requiredTopics + " and educational or informational content. A real notebook page of handwritten notes remains eligible even when its academic subject, wording, headings, or organization resembles textbook material; do not infer that handwritten notes are a printed textbook page from their subject or structure. Reject textbook content only when the submitted page itself is visibly printed or digital. If rejecting, give the specific visible reason.";
+}
+
+function normalizeDocumentQualityScore(score) {
+  if ((typeof score !== "number" && typeof score !== "string") || (typeof score === "string" && !score.trim())) {
+    return null;
+  }
+  var numericScore = Number(score);
+  if (!Number.isFinite(numericScore) || numericScore < 0 || numericScore > 100) {
+    return null;
+  }
+  return Math.round(numericScore);
+}
+
+function calculateDocumentReward(qualityScore, currentBatchSum) {
+  var batchRemaining = Math.max(0, 100 - currentBatchSum);
+  var proportionalReward = qualityScore * 0.2;
+  return Math.round(Math.min(20, batchRemaining, proportionalReward) * 100) / 100;
+}
+
 const WORKER_ID = "worker_" + process.pid + "_" + Math.random().toString(36).substring(2, 9);
 const LEASE_DURATION_MS = 120000; // 2 minutes
 const LEASE_RENEWAL_INTERVAL_MS = 30000; // 30 seconds
@@ -379,7 +403,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
 
   var qualityRules = isSelfie
     ? "You are a STRICT auditor. Is this a clear, authentic photograph of a real human face taken by a camera? You MUST reject AI-generated faces, cartoons, drawings, photos of screens, or masks. CRITICAL: You must also verify if the user explicitly complied with this specific directive: '" + specificTask + "'. If they failed this specific directive, or if the lighting/angle is wrong, set quality_pass to false and explain exactly why they failed the specific directive."
-    : "You are a STRINGENT data quality gatekeeper. You MUST reject this image if ANY of the following are true: (a) It is clearly a digital screenshot of a UI/website (allow low-quality physical photos). (b) It contains digital/typed/printed text from a computer, phone, or textbook. (c) It is a photo of a textbook, printed book page, or PDF document. (d) It is a random photo of an object, animal, scenery, or food that is NOT a document. (e) It is a blank or nearly blank page. (f) It contains human faces, selfies, or portrait photos. You may ONLY approve images that are authentic photographs of PHYSICAL, HANDWRITTEN notes written on real paper containing: " + (job.content_tags ? job.content_tags.join(", ") : "academic content") + ". The handwriting must be clearly visible and the content must be educational or informational. If rejecting, state the exact reason like 'Screenshot detected', 'Printed/digital text - not handwritten', 'Random photo - not a document', or 'Textbook page - not handwritten notes'.";
+    : buildDocumentQualityRules(job.content_tags);
 
   var combinedPrompt;
   if (isSelfie) {
@@ -444,10 +468,13 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   await incrementKeyCallCount(supabase, keyName);
 
   var aiVerdict = JSON.parse(response.text.trim());
+  var qualityScore = isSelfie ? null : normalizeDocumentQualityScore(aiVerdict.quality_score);
 
   // ---- 3. REJECTION: PII or quality fail ----
-  if (aiVerdict.contains_pii || !aiVerdict.quality_pass) {
-    var rejectReason = aiVerdict.contains_pii ? "Contains Sensitive PII" : aiVerdict.reason;
+  if (aiVerdict.contains_pii || !aiVerdict.quality_pass || (!isSelfie && qualityScore === null)) {
+    var rejectReason = aiVerdict.contains_pii
+      ? "Contains Sensitive PII"
+      : (!isSelfie && qualityScore === null ? "Invalid document quality score." : aiVerdict.reason);
     var rejectErrorCode = aiVerdict.contains_pii ? "PII_DETECTED" : "QUALITY_FAILED";
 
     if (relativeFilePath) {
@@ -628,7 +655,6 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   } else {
     // Documents: Each image earns up to 20 SYNX based on its rating
     // A 5-image batch earns a maximum combined total of 100 SYNX
-    var qualityScore = aiVerdict.quality_score || 0;
     
     // Only completely reject pure garbage or empty pages (< 40)
     if (qualityScore < 40) {
@@ -644,16 +670,8 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
       if (typeof leaseHeartbeat !== "undefined") clearInterval(leaseHeartbeat); return { jobId: job.id, result: "REJECTED", reason: "Quality score " + qualityScore + "/100 below absolute minimum" };
     }
 
-    // Rating-based reward calculation: up to 20 SYNX per document image
-    if (qualityScore >= 80) {
-      rewardAmount = 20; // Premium data: 20 SYNX
-    } else if (qualityScore >= 60) {
-      rewardAmount = 10; // Standard data: 10 SYNX
-    } else {
-      rewardAmount = 4;  // Low priority/sparse data: 4 SYNX
-    }
-
     // Enforce 100 SYNX maximum combined total across 5-image batch
+    var currentBatchSum = 0;
     if (job.batch_id) {
       var { data: batchJobs } = await supabase
         .from("upload_jobs")
@@ -661,19 +679,17 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
         .eq("batch_id", job.batch_id)
         .eq("reward_awarded", true)
         .neq("id", job.id);
-      var currentBatchSum = (batchJobs || []).reduce(function(acc, curr) {
+      currentBatchSum = (batchJobs || []).reduce(function(acc, curr) {
         return acc + (Number(curr.reward_amount) || 0);
       }, 0);
-      if (currentBatchSum + rewardAmount > 100) {
-        rewardAmount = Math.max(0, 100 - currentBatchSum);
-      }
     }
+    rewardAmount = calculateDocumentReward(qualityScore, currentBatchSum);
   }
 
   // ---- 8. ATOMIC IDEMPOTENT SETTLEMENT (RPC STRICT) ----
   var verifiedReason = isSelfie
     ? (aiVerdict.reason || "Liveness confirmed: Authenticated user face matching assigned directive.")
-    : (aiVerdict.reason || "Document approved: Verified handwriting density and structure.");
+    : "Quality rating: " + qualityScore + "/100. " + (aiVerdict.reason || "Document approved: Verified handwriting density and structure.");
 
   var { data: rpcSettlement, error: rpcSettlementErr } = await supabase.rpc("settle_job_reward", {
     p_job_id: job.id,
@@ -1044,7 +1060,9 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
-
+module.exports.buildDocumentQualityRules = buildDocumentQualityRules;
+module.exports.normalizeDocumentQualityScore = normalizeDocumentQualityScore;
+module.exports.calculateDocumentReward = calculateDocumentReward;
 
 
 

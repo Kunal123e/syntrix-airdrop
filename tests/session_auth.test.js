@@ -515,6 +515,58 @@ test("worker HTTP errors cancel response bodies and preserve status", async () =
   }
 });
 
+test("overlapping worker triggers coalesce and preserve a retrigger during each active pass", async () => {
+  const originalFetch = global.fetch;
+  const pendingRequests = [];
+  let fetchCalls = 0;
+  let canceledBodies = 0;
+
+  function makeResponse(status = 200) {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      body: { cancel: async () => { canceledBodies++; } },
+      clone() {
+        return makeResponse(status);
+      }
+    };
+  }
+
+  global.fetch = () => new Promise(resolve => {
+    fetchCalls++;
+    pendingRequests.push(resolve);
+  });
+
+  async function waitForFetchCalls(expected) {
+    for (let attempt = 0; attempt < 10 && fetchCalls < expected; attempt++) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(fetchCalls, expected);
+  }
+
+  try {
+    const requests = [serverModule.triggerUploadQueueWorker()];
+    await waitForFetchCalls(1);
+    requests.push(serverModule.triggerUploadQueueWorker(), serverModule.triggerUploadQueueWorker());
+    assert.equal(fetchCalls, 1, "overlapping callers must not start concurrent worker requests");
+
+    pendingRequests[0](makeResponse(429));
+    await waitForFetchCalls(2);
+    requests.push(serverModule.triggerUploadQueueWorker());
+    pendingRequests[1](makeResponse());
+    await waitForFetchCalls(3);
+    pendingRequests[2](makeResponse());
+
+    const responses = await Promise.all(requests);
+    assert.equal(fetchCalls, 3, "concurrent triggers coalesce to one follow-up per active pass");
+    assert.equal(canceledBodies, 2, "failed and superseded responses are drained");
+    assert.ok(responses.every(response => response.status === 200));
+    assert.notEqual(responses[0], responses[1], "each caller receives an independent response clone");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("admin wake cancels successful bodies while polling continues to parse JSON", async (t) => {
   const originalFetch = global.fetch;
   const nativeFetch = originalFetch;

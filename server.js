@@ -798,7 +798,10 @@ function getInternalWorkerUrl() {
   return `http://127.0.0.1:${Number(port)}/api/process-queue`;
 }
 
-async function triggerUploadQueueWorker(signal) {
+let activeWorkerTrigger = null;
+let workerTriggerPending = false;
+
+async function sendUploadQueueWorkerRequest(signal) {
   if (!isSessionAuthConfigured()) {
     throw new Error("Worker session authentication is not configured.");
   }
@@ -825,10 +828,69 @@ async function triggerUploadQueueWorker(signal) {
       }
       throw error;
     }
-    return response;
+    if (typeof response.text !== "function") return response;
+    return {
+      isWorkerResponse: true,
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      bodyText: await response.text()
+    };
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
+}
+
+function copyWorkerResponse(response) {
+  if (response && response.isWorkerResponse) {
+    const bodylessStatus = [204, 205, 304].includes(response.status);
+    return new Response(bodylessStatus ? null : response.bodyText, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers
+    });
+  }
+  return typeof response.clone === "function" ? response.clone() : response;
+}
+
+function triggerUploadQueueWorker(signal) {
+  if (activeWorkerTrigger) {
+    workerTriggerPending = true;
+    return activeWorkerTrigger.then(copyWorkerResponse);
+  }
+
+  const workerTrigger = (async () => {
+    let response;
+    let requestSignal = signal;
+    try {
+      do {
+        workerTriggerPending = false;
+        try {
+          response = await sendUploadQueueWorkerRequest(requestSignal);
+        } catch (error) {
+          if (!workerTriggerPending) throw error;
+          requestSignal = undefined;
+          continue;
+        }
+
+        if (workerTriggerPending) {
+          try {
+            await response.body?.cancel();
+          } catch (cancelError) {
+            // The follow-up pass is still required even if the earlier response cannot be drained.
+          }
+          requestSignal = undefined;
+        }
+      } while (workerTriggerPending);
+      return response;
+    } finally {
+      activeWorkerTrigger = null;
+      workerTriggerPending = false;
+    }
+  })();
+
+  activeWorkerTrigger = workerTrigger;
+  return workerTrigger.then(copyWorkerResponse);
 }
 
 // ================= UI POLLING ENDPOINT =================
@@ -962,10 +1024,7 @@ app.post("/api/upload-task", async (req, res) => {
     }
 })();
 
-let isWorkerActive = false;
 async function runUploadQueuePoll() {
-  if (isWorkerActive) return;
-  isWorkerActive = true;
   try {
     const response = await triggerUploadQueueWorker();
     const data = await response.json();
@@ -974,8 +1033,6 @@ async function runUploadQueuePoll() {
     }
   } catch (err) {
     console.error("[WORKER ERROR] Background loop failed:", err.message);
-  } finally {
-    isWorkerActive = false;
   }
 }
 setInterval(runUploadQueuePoll, 5000);
@@ -1242,13 +1299,7 @@ app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bo
 // QUEUE AUTO-POLLER (SAFE HEARTBEAT)
 // Automatically triggers the queue, but waits if a heavy batch is running
 // =====================================================================
-let isQueueRunning = false;
-
 async function executeSafeQueuePass() {
-  // If the previous job is still running, skip this heartbeat to prevent overlapping timeouts
-  if (isQueueRunning) return; 
-  
-  isQueueRunning = true; // Lock the queue
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 90000);
@@ -1260,8 +1311,6 @@ async function executeSafeQueuePass() {
     }
   } catch (err) {
     console.error("[QUEUE HEARTBEAT ERROR]", err.message);
-  } finally {
-    isQueueRunning = false; // Unlock the queue when finished
   }
 }
 
