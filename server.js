@@ -6,6 +6,13 @@ const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 const { ethers } = require("ethers");
 const { GoogleGenAI } = require("@google/genai");
+const {
+  createAdminToken,
+  createWorkerToken,
+  isSessionAuthConfigured,
+  safeStringEqual,
+  verifySessionToken
+} = require("./sessionAuth");
 
 // XP SYSTEM IMPORT
 const { awardXP, getXPProfile, calculateFinalTaskReward } = require("./xpengine");
@@ -106,7 +113,7 @@ if (process.env.RPC_URL && process.env.PRIVATE_KEY && process.env.TOKEN_ADDRESS)
     console.error("Blockchain provider initialization failed:", err.message);
   }
 } else {
-  console.warn("Blockchain credentials missing in .env. Claim routes will run in MOCK queue engine mode.");
+  console.warn("Blockchain credentials missing in .env. Payout redemption remains disabled.");
 }
 
 // ================= BREVO HTTP EMAIL API SETUP =================
@@ -587,7 +594,14 @@ app.get("/api/claim-details", async (req, res) => {
 });
 
 // ================= CRYPTOGRAPHIC QUEUE INGESTION ENDPOINT =================
+const PAYOUT_EXECUTION_ENABLED = false;
+const REDEMPTION_DISABLED_RESPONSE = {
+  success: false,
+  error: "Payout redemption is temporarily disabled."
+};
+
 app.post("/api/execute-claim", async (req, res) => {
+  if (!PAYOUT_EXECUTION_ENABLED) return res.status(503).json(REDEMPTION_DISABLED_RESPONSE);
   const { token, walletAddress, signature } = req.body;
 
   if (!token || !walletAddress || !signature) return res.status(400).json({ error: "Token, wallet address, and cryptographic signature verification required." });
@@ -640,6 +654,7 @@ app.post("/api/execute-claim", async (req, res) => {
 
 // ================= LAZY SURVEY CLAIM DISPENSER =================
 app.post("/api/claim-reward", async (req, res) => {
+  if (!PAYOUT_EXECUTION_ENABLED) return res.status(503).json(REDEMPTION_DISABLED_RESPONSE);
   const { email, walletAddress } = req.body;
   if (!email || !walletAddress) return res.status(400).json({ error: "Email and destination wallet address are required." });
   if (!ethers.isAddress(walletAddress)) return res.status(400).json({ error: "Invalid target wallet address string." });
@@ -678,6 +693,7 @@ app.post("/api/claim-reward", async (req, res) => {
 let isQueueProcessing = false;
 
 async function processPayoutQueueEngine() {
+  if (!PAYOUT_EXECUTION_ENABLED || !tokenContract) return;
   if (isQueueProcessing) return;
   isQueueProcessing = true;
 
@@ -713,13 +729,6 @@ async function processPayoutQueueEngine() {
     const queueJob = payout;
 
     console.log(`[QUEUE ENGINE] Processing job ID ${queueJob.id} for target recipient: ${queueJob.email}`);
-
-    if (!tokenContract) {
-      const mockTxHash = "0x" + crypto.randomBytes(32).toString("hex");
-      await finalizeSuccessfulQueueJob(queueJob, mockTxHash);
-      isQueueProcessing = false;
-      return;
-    }
 
     try {
       const decimals = await tokenContract.decimals();
@@ -778,6 +787,49 @@ function addUniqueThreadGuard() {
   processPayoutQueueEngine().catch(err => console.error("Thread system leak caught:", err.message));
 }
 const processPayoutQueue = processPayoutQueueEngine;
+
+const WORKER_REQUEST_TIMEOUT_MS = 30000;
+
+function getInternalWorkerUrl() {
+  const port = String(process.env.PORT || 5000);
+  if (!/^\d{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
+    throw new Error("Invalid server port configuration.");
+  }
+  return `http://127.0.0.1:${Number(port)}/api/process-queue`;
+}
+
+async function triggerUploadQueueWorker(signal) {
+  if (!isSessionAuthConfigured()) {
+    throw new Error("Worker session authentication is not configured.");
+  }
+
+  const requestController = signal ? null : new AbortController();
+  const timeoutId = requestController
+    ? setTimeout(() => requestController.abort(new Error("Internal worker request timed out.")), WORKER_REQUEST_TIMEOUT_MS)
+    : null;
+  try {
+    const workerToken = createWorkerToken();
+    const response = await fetch(getInternalWorkerUrl(), {
+      method: "POST",
+      headers: { "x-admin-key": workerToken },
+      redirect: "manual",
+      signal: signal || requestController.signal
+    });
+    if (!response.ok) {
+      const error = new Error(`Queue worker returned HTTP ${response.status}.`);
+      error.statusCode = response.status;
+      try {
+        await response.body?.cancel();
+      } catch (cancelError) {
+        error.cause = cancelError;
+      }
+      throw error;
+    }
+    return response;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
 
 // ================= UI POLLING ENDPOINT =================
 app.get("/api/check-submission", async (req, res) => {
@@ -883,16 +935,10 @@ app.post("/api/upload-task", async (req, res) => {
 
     res.json({ success: true, message: "Queued for AI Verification" });
     
-    // Auto-wake the worker in the background (Fire and Forget)
-    try {
-        const host = req.headers['x-forwarded-host'] || req.get('host');
-        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-        const fetchUrl = `${protocol}://${host}/api/process-queue`;
-        fetch(fetchUrl, {
-            method: "POST",
-            headers: { "x-admin-key": process.env.ADMIN_SECRET_KEY }
-        }).catch(e => {}); // Silent catch for background task
-    } catch(e) {}
+    // Auto-wake the worker in the background after the upload is safely queued.
+    triggerUploadQueueWorker()
+      .then(response => response.body?.cancel())
+      .catch(err => console.error("[QUEUE WAKE ERROR]", err.message));
     
   } catch (err) {
     return res.status(500).json({ error: "Ingestion failed: " + err.message });
@@ -917,30 +963,22 @@ app.post("/api/upload-task", async (req, res) => {
 })();
 
 let isWorkerActive = false;
-setInterval(async () => {
-    if (isWorkerActive) return;
-    isWorkerActive = true;
-    try {
-        const adminKey = process.env.ADMIN_SECRET_KEY;
-        if (!adminKey) return;
-        const PORT = process.env.PORT || 5000;
-        
-        const fetchUrl = "http://localhost:" + PORT + "/api/process-queue";
-        const res = await fetch(fetchUrl, {
-            method: "POST",
-            headers: { "x-admin-key": adminKey }
-        });
-        
-        const data = await res.json();
-        if (data && data.processed > 0) {
-            console.log("[QUEUE] Processed " + data.processed + " jobs successfully.");
-        }
-    } catch (e) {
-        console.error("[WORKER ERROR] Background loop failed:", e.message);
-    } finally {
-        isWorkerActive = false;
+async function runUploadQueuePoll() {
+  if (isWorkerActive) return;
+  isWorkerActive = true;
+  try {
+    const response = await triggerUploadQueueWorker();
+    const data = await response.json();
+    if (data && data.processed > 0) {
+      console.log("[QUEUE] Processed " + data.processed + " jobs successfully.");
     }
-}, 5000);
+  } catch (err) {
+    console.error("[WORKER ERROR] Background loop failed:", err.message);
+  } finally {
+    isWorkerActive = false;
+  }
+}
+setInterval(runUploadQueuePoll, 5000);
 
 let lastPublicWakeTimestamp = 0;
 const PUBLIC_WAKE_COOLDOWN_MS = 5000;
@@ -955,32 +993,24 @@ app.post("/api/public-wake", async (req, res) => {
     }
     lastPublicWakeTimestamp = now;
 
-    const host = req.headers['x-forwarded-host'] || req.get('host');
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const fetchUrl = `${protocol}://${host}/api/process-queue`;
-    
-    fetch(fetchUrl, {
-        method: "POST",
-        headers: { "x-admin-key": process.env.ADMIN_SECRET_KEY }
-    }).catch(e => console.log("Wake error:", e.message));
-    
-    res.json({ success: true, message: "AI Worker signaled." });
+    return res.status(503).json({
+        success: false,
+        message: "Public worker wake is disabled."
+    });
 });
 
-app.post("/api/admin/queue/wake", async (req, res) => {
-    const adminKey = req.headers["x-admin-key"];
-    if (!process.env.ADMIN_SECRET_KEY || adminKey !== process.env.ADMIN_SECRET_KEY) {
-        return res.status(403).json({ success: false, error: "Unauthorized" });
+app.post("/api/admin/queue/wake", verifyAdminAccess, async (req, res) => {
+    try {
+        const workerResponse = await triggerUploadQueueWorker();
+        await workerResponse.body?.cancel();
+        return res.json({ success: true, message: "Worker awakened and queue triggered." });
+    } catch (err) {
+        console.error("[ADMIN QUEUE WAKE ERROR]", err.message);
+        const status = Number.isInteger(err.statusCode) && err.statusCode >= 400 && err.statusCode <= 599
+          ? err.statusCode
+          : 502;
+        return res.status(status).json({ success: false, error: "Unable to trigger queue worker." });
     }
-    const PORT = process.env.PORT || 5000;
-    const fetchUrl = "http://127.0.0.1:" + PORT + "/api/process-queue";
-    
-    fetch(fetchUrl, {
-        method: "POST",
-        headers: { "x-admin-key": adminKey }
-    }).catch(function(e){});
-    
-    res.json({ success: true, message: "Worker awakened and queue triggered." });
 });
 
 // ================= XP PROFILE =================
@@ -1000,23 +1030,22 @@ app.get("/api/xp-profile", async (req, res) => {
 // =========================================================================
 
 // -- Admin Auth Middleware --
-// Reads x-admin-key header and validates against ADMIN_SECRET_KEY env var.
+// Reads x-admin-key header and validates an admin session token.
 // Protects all /api/admin/* routes except /api/admin/login.
 function verifyAdminAccess(req, res, next) {
   var adminKey = req.headers['x-admin-key'];
-  var correctKey = process.env.ADMIN_SECRET_KEY;
 
-  if (!correctKey) {
-    return res.status(500).json({
+  if (!isSessionAuthConfigured()) {
+    return res.status(503).json({
       success: false,
-      error: "Admin secret key not configured on server."
+      error: "Session authentication is not configured."
     });
   }
 
-  if (!adminKey || adminKey !== correctKey) {
+  if (!verifySessionToken(adminKey, "admin", "syntrix-admin-session")) {
     return res.status(403).json({
       success: false,
-      error: "Forbidden: Invalid or missing admin key."
+      error: "Forbidden: Invalid or missing admin session."
     });
   }
 
@@ -1024,10 +1053,10 @@ function verifyAdminAccess(req, res, next) {
 }
 
 // -- POST /api/admin/login --
-// Checks password against ADMIN_SECRET_KEY and returns it as a session token.
+// Checks password against ADMIN_SECRET_KEY and returns a signed admin session.
 app.post("/api/admin/login", function(req, res) {
   try {
-    var password = (req.body.password || '').trim();
+    var password = req.body && typeof req.body.password === "string" ? req.body.password.trim() : "";
 
     if (!password) {
       return res.status(400).json({
@@ -1036,7 +1065,14 @@ app.post("/api/admin/login", function(req, res) {
       });
     }
 
-    if (password !== process.env.ADMIN_SECRET_KEY) {
+    if (!process.env.ADMIN_SECRET_KEY || !isSessionAuthConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: "Session authentication is not configured."
+      });
+    }
+
+    if (!safeStringEqual(password, process.env.ADMIN_SECRET_KEY)) {
       return res.status(401).json({
         success: false,
         error: 'Authentication denied. Invalid credentials.'
@@ -1045,11 +1081,11 @@ app.post("/api/admin/login", function(req, res) {
 
     return res.json({
       success: true,
-      token: password
+      token: createAdminToken()
     });
 
   } catch (err) {
-    console.error('[ADMIN LOGIN ERROR]', err.message);
+    console.error('[ADMIN LOGIN ERROR]', "Session token issuance failed.");
     return res.status(500).json({
       success: false,
       error: 'Internal server error during authentication.'
@@ -1212,28 +1248,29 @@ async function executeSafeQueuePass() {
   // If the previous job is still running, skip this heartbeat to prevent overlapping timeouts
   if (isQueueRunning) return; 
   
-  const adminKey = process.env.ADMIN_SECRET_KEY;
-  const port = process.env.PORT || 5000;
-  
-  if (adminKey) {
-    isQueueRunning = true; // Lock the queue
+  isQueueRunning = true; // Lock the queue
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 90000);
     try {
-      // Caller timeout (90s) is strictly longer than internal batch budget (60s AI limit)
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 90000);
-
-      await fetch(`http://localhost:${port}/api/process-queue`, {
-        method: 'POST',
-        headers: { 'x-admin-key': adminKey },
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-    } catch (err) {
-      // Silent catch to prevent console spam
+      const response = await triggerUploadQueueWorker(controller.signal);
+      await response.json();
     } finally {
-      isQueueRunning = false; // Unlock the queue when finished
+      clearTimeout(timeoutId);
     }
+  } catch (err) {
+    console.error("[QUEUE HEARTBEAT ERROR]", err.message);
+  } finally {
+    isQueueRunning = false; // Unlock the queue when finished
   }
 }
 
 setInterval(executeSafeQueuePass, 10000); // Checks every 10 seconds safely
+
+module.exports = {
+  app,
+  executeSafeQueuePass,
+  runUploadQueuePoll,
+  triggerUploadQueueWorker,
+  WORKER_REQUEST_TIMEOUT_MS
+};

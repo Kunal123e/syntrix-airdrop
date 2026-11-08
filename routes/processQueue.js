@@ -5,14 +5,17 @@
 // processes them through Gemini AI with key pooling & rate limit handling,
 // awards SYNX tokens idempotently, and rolls up batch statuses.
 //
-// Trigger via: Vercel Cron, Supabase Webhook, external scheduler,
-// or setInterval in server.js.
-// Secured with x-admin-key header.
+// Trigger via the admin wake endpoint or trusted server-side polling in server.js.
+// Secured with a purpose-bound worker session in the x-admin-key header.
 // =====================================================================
 
 const express = require("express");
 const crypto = require("crypto");
 const { GoogleGenAI } = require("@google/genai");
+const {
+  isSessionAuthConfigured,
+  verifySessionToken
+} = require("../sessionAuth");
 const router = express.Router();
 
 const WORKER_ID = "worker_" + process.pid + "_" + Math.random().toString(36).substring(2, 9);
@@ -806,11 +809,18 @@ async function rollupBatchStatus(supabase, batchId, sendEmailHTTP) {
 
 // =====================================================================
 // POST /api/process-queue — Serverless Queue Processor (Phase 3)
-// Secured with x-admin-key header.
+// Secured with a purpose-bound worker session in the x-admin-key header.
 // =====================================================================
 let isProcessingActive = false;
 
 router.post("/", async (req, res) => {
+  if (!isSessionAuthConfigured()) {
+    return res.status(503).json({ success: false, error: "Session authentication is not configured." });
+  }
+  if (!verifySessionToken(req.headers["x-admin-key"], "worker", "syntrix-upload-queue")) {
+    return res.status(403).json({ success: false, error: "Unauthorized." });
+  }
+
   // Concurrency guard: prevent overlapping server-side queue passes
   if (isProcessingActive) {
     return res.status(429).json({ success: false, message: "Queue processor already active on server." });
@@ -820,14 +830,6 @@ router.post("/", async (req, res) => {
   try {
     var supabase = req.app.locals.supabase;
     var sendEmailHTTP = req.app.locals.sendEmailHTTP;
-    var adminKey = req.headers["x-admin-key"];
-
-    // ---- Auth Check ----
-    if (!process.env.ADMIN_SECRET_KEY || adminKey !== process.env.ADMIN_SECRET_KEY) {
-      isProcessingActive = false;
-      return res.status(403).json({ success: false, error: "Unauthorized." });
-    }
-
     // ---- Load XP functions (graceful fallback if xpengine is unavailable) ----
     var xpFunctions = {};
     try {
@@ -1017,14 +1019,16 @@ router.post("/", async (req, res) => {
 
 // =====================================================================
 // GET /api/process-queue/key-status - View Gemini key pool status
-// Secured with x-admin-key header.
+// Secured with an admin session in the x-admin-key header.
 // =====================================================================
 router.get("/key-status", async (req, res) => {
   try {
     var supabase = req.app.locals.supabase;
-    var adminKey = req.headers["x-admin-key"];
 
-    if (!process.env.ADMIN_SECRET_KEY || adminKey !== process.env.ADMIN_SECRET_KEY) {
+    if (!isSessionAuthConfigured()) {
+      return res.status(503).json({ success: false, error: "Session authentication is not configured." });
+    }
+    if (!verifySessionToken(req.headers["x-admin-key"], "admin", "syntrix-admin-session")) {
       return res.status(403).json({ success: false, error: "Unauthorized." });
     }
 
@@ -1044,10 +1048,6 @@ router.get("/key-status", async (req, res) => {
 });
 
 module.exports = router;
-
-
-
-
 
 
 
