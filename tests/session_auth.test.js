@@ -170,6 +170,110 @@ test("process-queue accepts only worker sessions and key-status accepts only adm
   assert.deepEqual((await adminResponse.json()).keys, []);
 });
 
+test("process-queue preserves a failed upload record when its storage asset is missing", async (t) => {
+  const originalFetch = global.fetch;
+  const originalDocumentKey = process.env.GEMINI_DOCUMENT_KEY_1;
+  const updates = [];
+  let deleted = false;
+  process.env.GEMINI_DOCUMENT_KEY_1 = "test-document-key";
+
+  const job = {
+    id: "missing-asset-job",
+    status: "QUEUED",
+    user_email: "user@example.test",
+    task_type: "document",
+    storage_url: "https://storage.invalid/storage/v1/object/public/verified_assets/missing.jpg",
+    file_name: "missing.jpg",
+    file_hash: "missing-hash",
+    retry_count: 0,
+    max_retries: 3,
+    batch_id: "missing-asset-batch",
+    content_tags: [],
+    assigned_task: null
+  };
+  const app = express();
+  app.locals.supabase = {
+    rpc: async () => ({ data: [job], error: null }),
+    from(table) {
+      let operation;
+      let selected = false;
+      const builder = {
+        select() {
+          selected = true;
+          return this;
+        },
+        update(values) {
+          operation = { type: "update", values };
+          if (table === "upload_jobs") updates.push(values);
+          return this;
+        },
+        delete() {
+          deleted = true;
+          operation = { type: "delete" };
+          return this;
+        },
+        eq() { return this; },
+        or() { return this; },
+        then(resolve, reject) {
+          let result = { data: [], error: null };
+          if (table === "upload_jobs" && operation && operation.values.status === "PROCESSING" && selected) {
+            result = { data: [{ id: job.id }], error: null };
+          } else if (table === "upload_jobs" && selected) {
+            result = { data: [{ status: "FAILED", user_email: job.user_email }], error: null };
+          }
+          return Promise.resolve(result).then(resolve, reject);
+        },
+        single() {
+          return Promise.resolve({ data: { status: "PROCESSING" }, error: null });
+        }
+      };
+      return builder;
+    },
+    storage: {
+      from() {
+        return {
+          download: async () => ({
+            data: null,
+            error: { message: "Object not found", statusCode: 404 }
+          })
+        };
+      }
+    }
+  };
+  global.fetch = async () => ({ ok: false, status: 404 });
+  app.use("/api/process-queue", processQueueRouter);
+
+  const server = http.createServer(app);
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    global.fetch = originalFetch;
+    if (originalDocumentKey === undefined) delete process.env.GEMINI_DOCUMENT_KEY_1;
+    else process.env.GEMINI_DOCUMENT_KEY_1 = originalDocumentKey;
+    await new Promise((resolve, reject) => {
+      server.close(err => err ? reject(err) : resolve());
+    });
+  });
+
+  const response = await originalFetch(`http://127.0.0.1:${server.address().port}/api/process-queue`, {
+    method: "POST",
+    headers: { "x-admin-key": createWorkerToken() }
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.results[0].result, "FAILED");
+  assert.equal(deleted, false);
+
+  const failureUpdate = updates.find(update => update.status === "FAILED");
+  assert.ok(failureUpdate);
+  assert.equal(failureUpdate.error_code, "ASSET_NOT_FOUND");
+  assert.match(failureUpdate.reason, /Storage object not found/);
+  assert.ok(Number.isFinite(Date.parse(failureUpdate.processed_at)));
+  assert.equal(failureUpdate.retry_count, 1);
+  assert.equal(failureUpdate.assigned_key, null);
+  assert.equal(failureUpdate.locked_by, null);
+  assert.equal(failureUpdate.lease_expires_at, null);
+});
+
 test("claim routes fail closed and internal admin wake uses a signed worker session", async (t) => {
   const originalEnv = {
     port: process.env.PORT,
