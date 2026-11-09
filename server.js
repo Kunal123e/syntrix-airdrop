@@ -802,30 +802,38 @@ function getInternalWorkerUrl() {
 let activeWorkerTrigger = null;
 let workerTriggerPending = false;
 
-async function sendUploadQueueWorkerRequest(signal) {
+async function sendUploadQueueWorkerRequest() {
   if (!isSessionAuthConfigured()) {
     throw new Error("Worker session authentication is not configured.");
   }
 
-  const requestController = signal ? null : new AbortController();
-  const timeoutId = requestController
-    ? setTimeout(() => requestController.abort(new Error("Internal worker request timed out.")), WORKER_REQUEST_TIMEOUT_MS)
-    : null;
+  const requestController = new AbortController();
+  const timeoutId = setTimeout(
+    () => requestController.abort(new Error("Internal worker request timed out.")),
+    WORKER_REQUEST_TIMEOUT_MS
+  );
   try {
     const workerToken = createWorkerToken();
     const response = await fetch(getInternalWorkerUrl(), {
       method: "POST",
       headers: { "x-admin-key": workerToken },
       redirect: "manual",
-      signal: signal || requestController.signal
+      signal: requestController.signal
     });
     if (!response.ok) {
       const error = new Error(`Queue worker returned HTTP ${response.status}.`);
       error.statusCode = response.status;
-      try {
-        await response.body?.cancel();
-      } catch (cancelError) {
-        error.cause = cancelError;
+      if (typeof response.text === "function") {
+        const bodyText = await response.text();
+        if (response.status === 429 && bodyText.includes("Queue processor already active on server.")) {
+          error.workerBusy = true;
+        }
+      } else {
+        try {
+          await response.body?.cancel();
+        } catch (cancelError) {
+          error.cause = cancelError;
+        }
       }
       throw error;
     }
@@ -842,6 +850,28 @@ async function sendUploadQueueWorkerRequest(signal) {
   }
 }
 
+function waitForWorkerTrigger(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(signal.reason || new Error("Worker trigger was aborted."));
+  }
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason || new Error("Worker trigger was aborted."));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      value => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      error => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
 function copyWorkerResponse(response) {
   if (response && response.isWorkerResponse) {
     const bodylessStatus = [204, 205, 304].includes(response.status);
@@ -855,32 +885,33 @@ function copyWorkerResponse(response) {
 }
 
 function triggerUploadQueueWorker(signal) {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason || new Error("Worker trigger was aborted."));
+  }
   if (activeWorkerTrigger) {
     workerTriggerPending = true;
-    return activeWorkerTrigger.then(copyWorkerResponse);
+    return waitForWorkerTrigger(activeWorkerTrigger.then(copyWorkerResponse), signal);
   }
 
   const workerTrigger = (async () => {
     let response;
-    let requestSignal = signal;
+    let consecutiveBusyResponses = 0;
     try {
       do {
         workerTriggerPending = false;
         try {
-          response = await sendUploadQueueWorkerRequest(requestSignal);
+          response = await sendUploadQueueWorkerRequest();
+          consecutiveBusyResponses = 0;
         } catch (error) {
-          if (!workerTriggerPending) throw error;
-          requestSignal = undefined;
-          continue;
-        }
-
-        if (workerTriggerPending) {
-          try {
-            await response.body?.cancel();
-          } catch (cancelError) {
-            // The follow-up pass is still required even if the earlier response cannot be drained.
+          if (error.workerBusy || error.message === "Internal worker request timed out.") {
+            consecutiveBusyResponses++;
+            const retryDelay = Math.min(1000 * (2 ** Math.min(consecutiveBusyResponses - 1, 3)), 8000);
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            workerTriggerPending = true;
+            continue;
           }
-          requestSignal = undefined;
+          if (!workerTriggerPending) throw error;
+          continue;
         }
       } while (workerTriggerPending);
       return response;
@@ -891,7 +922,7 @@ function triggerUploadQueueWorker(signal) {
   })();
 
   activeWorkerTrigger = workerTrigger;
-  return workerTrigger.then(copyWorkerResponse);
+  return waitForWorkerTrigger(workerTrigger.then(copyWorkerResponse), signal);
 }
 
 // ================= UI POLLING ENDPOINT =================
@@ -1303,14 +1334,8 @@ app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT} bo
 // =====================================================================
 async function executeSafeQueuePass() {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000);
-    try {
-      const response = await triggerUploadQueueWorker(controller.signal);
-      await response.json();
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    const response = await triggerUploadQueueWorker();
+    await response.json();
   } catch (err) {
     console.error("[QUEUE HEARTBEAT ERROR]", err.message);
   }
