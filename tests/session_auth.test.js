@@ -266,7 +266,7 @@ test("process-queue preserves a failed upload record when its storage asset is m
   const failureUpdate = updates.find(update => update.status === "FAILED");
   assert.ok(failureUpdate);
   assert.equal(failureUpdate.error_code, "ASSET_NOT_FOUND");
-  assert.match(failureUpdate.reason, /Storage object not found/);
+  assert.match(failureUpdate.reason, /HTTP 404: Storage object does not exist/);
   assert.ok(Number.isFinite(Date.parse(failureUpdate.processed_at)));
   assert.equal(failureUpdate.retry_count, 1);
   assert.equal(failureUpdate.assigned_key, null);
@@ -454,40 +454,61 @@ test("claim routes fail closed and internal admin wake uses a signed worker sess
   }
 });
 
-test("worker requests have a bounded default timeout and preserve explicit caller signals", async () => {
+test("worker requests have a bounded internal timeout and caller abort does not cancel a shared pass", async () => {
   const originalFetch = global.fetch;
   const originalSetTimeout = global.setTimeout;
   const originalClearTimeout = global.clearTimeout;
   let defaultTimeoutDelay;
   let observedSignal;
+  let fetchCalls = 0;
+  let finishThirdRequest;
 
   global.setTimeout = (callback, delay, ...args) => {
     if (delay === serverModule.WORKER_REQUEST_TIMEOUT_MS) {
       defaultTimeoutDelay = delay;
-      return originalSetTimeout(callback, 1, ...args);
+      return originalSetTimeout(callback, fetchCalls === 0 ? 1 : delay, ...args);
     }
     return originalSetTimeout(callback, delay, ...args);
   };
   global.fetch = (_url, options) => new Promise((resolve, reject) => {
+    fetchCalls++;
     observedSignal = options.signal;
     if (options.signal.aborted) {
       reject(options.signal.reason);
       return;
     }
-    options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    if (fetchCalls === 1) {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    } else if (fetchCalls === 2) {
+      resolve({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ processed: 0 })
+      });
+    } else {
+      finishThirdRequest = resolve;
+    }
   });
 
   try {
-    await assert.rejects(serverModule.triggerUploadQueueWorker(), /Internal worker request timed out/);
+    const retriedResponse = await serverModule.triggerUploadQueueWorker();
+    assert.equal(retriedResponse.status, 200);
     assert.equal(defaultTimeoutDelay, 30000);
+    assert.equal(fetchCalls, 2, "an ambiguous timed-out request is serialized with its retry");
 
     defaultTimeoutDelay = undefined;
     const callerController = new AbortController();
     const request = serverModule.triggerUploadQueueWorker(callerController.signal);
-    assert.equal(observedSignal, callerController.signal);
+    assert.notEqual(observedSignal, callerController.signal);
     callerController.abort(new Error("Caller timeout"));
     await assert.rejects(request, /Caller timeout/);
-    assert.equal(defaultTimeoutDelay, undefined);
+    assert.equal(observedSignal.aborted, false, "aborting one waiter must not abort the shared worker pass");
+    finishThirdRequest({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ processed: 0 })
+    });
+    await new Promise(resolve => setImmediate(resolve));
   } finally {
     global.fetch = originalFetch;
     global.setTimeout = originalSetTimeout;
@@ -518,6 +539,7 @@ test("worker HTTP errors cancel response bodies and preserve status", async () =
 test("overlapping worker triggers coalesce and preserve a retrigger during each active pass", async () => {
   const originalFetch = global.fetch;
   const pendingRequests = [];
+  const requestUrls = [];
   let fetchCalls = 0;
   let canceledBodies = 0;
 
@@ -525,6 +547,9 @@ test("overlapping worker triggers coalesce and preserve a retrigger during each 
     return {
       ok: status >= 200 && status < 300,
       status,
+      text: async () => status === 429
+        ? JSON.stringify({ message: "Queue processor already active on server." })
+        : JSON.stringify({ processed: 0 }),
       body: { cancel: async () => { canceledBodies++; } },
       clone() {
         return makeResponse(status);
@@ -532,14 +557,15 @@ test("overlapping worker triggers coalesce and preserve a retrigger during each 
     };
   }
 
-  global.fetch = () => new Promise(resolve => {
+  global.fetch = url => new Promise(resolve => {
     fetchCalls++;
+    requestUrls.push(url);
     pendingRequests.push(resolve);
   });
 
   async function waitForFetchCalls(expected) {
-    for (let attempt = 0; attempt < 10 && fetchCalls < expected; attempt++) {
-      await new Promise(resolve => setImmediate(resolve));
+    for (let attempt = 0; attempt < 500 && fetchCalls < expected; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
     }
     assert.equal(fetchCalls, expected);
   }
@@ -558,10 +584,45 @@ test("overlapping worker triggers coalesce and preserve a retrigger during each 
     pendingRequests[2](makeResponse());
 
     const responses = await Promise.all(requests);
-    assert.equal(fetchCalls, 3, "concurrent triggers coalesce to one follow-up per active pass");
-    assert.equal(canceledBodies, 2, "failed and superseded responses are drained");
+    assert.equal(fetchCalls, 3, "busy responses retry serially and concurrent triggers coalesce to one follow-up");
+    assert.ok(requestUrls.every(url => /^http:\/\/127\.0\.0\.1:\d+\/api\/process-queue$/.test(url)));
+    assert.equal(canceledBodies, 0, "response bodies are buffered instead of prematurely canceled");
     assert.ok(responses.every(response => response.status === 200));
-    assert.notEqual(responses[0], responses[1], "each caller receives an independent response clone");
+    assert.notEqual(responses[0], responses[1], "each caller receives an independent response");
+    assert.deepEqual(await Promise.all(responses.map(response => response.json())), [
+      { processed: 0 },
+      { processed: 0 },
+      { processed: 0 },
+      { processed: 0 }
+    ]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("a worker-busy 429 is retried even when no later trigger is pending", async () => {
+  const originalFetch = global.fetch;
+  let fetchCalls = 0;
+  global.fetch = async () => {
+    fetchCalls++;
+    if (fetchCalls === 1) {
+      return {
+        ok: false,
+        status: 429,
+        text: async () => JSON.stringify({ message: "Queue processor already active on server." })
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ processed: 0 })
+    };
+  };
+
+  try {
+    const response = await serverModule.triggerUploadQueueWorker();
+    assert.equal(response.status, 200);
+    assert.equal(fetchCalls, 2, "busy guard response is retried until the active pass completes");
   } finally {
     global.fetch = originalFetch;
   }
@@ -622,85 +683,81 @@ test("admin wake cancels successful bodies while polling continues to parse JSON
   }
 });
 
-test("90-second poll timeout errors are handled and queue lock is released", async () => {
+test("heartbeat and poll triggers serialize and rerun when a pass is already active", async () => {
   const originalFetch = global.fetch;
-  const originalSetTimeout = global.setTimeout;
   const originalConsoleError = console.error;
-  let timeoutDelay;
   let fetchCalls = 0;
-  let loggedTimeouts = 0;
-  global.setTimeout = (callback, delay, ...args) => {
-    if (delay === 90000) {
-      timeoutDelay = delay;
-      return originalSetTimeout(callback, 1, ...args);
-    }
-    return originalSetTimeout(callback, delay, ...args);
-  };
+  const pendingRequests = [];
+  let loggedErrors = 0;
   global.fetch = (_url, options) => {
     fetchCalls++;
-    return new Promise((resolve, reject) => {
-      if (options.signal.aborted) {
-        reject(options.signal.reason);
-        return;
-      }
-      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
-    });
+    assert.ok(options.signal, "worker requests retain their own bounded request signal");
+    return new Promise(resolve => { pendingRequests.push(resolve); });
   };
   console.error = (...args) => {
-    if (args[0] === "[QUEUE HEARTBEAT ERROR]") loggedTimeouts++;
+    if (args[0] === "[QUEUE HEARTBEAT ERROR]") loggedErrors++;
   };
 
   try {
-    await serverModule.executeSafeQueuePass();
-    await serverModule.executeSafeQueuePass();
-    assert.equal(timeoutDelay, 90000);
+    const heartbeatPass = serverModule.executeSafeQueuePass();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fetchCalls, 1);
+    const pollPass = serverModule.runUploadQueuePoll();
+    pendingRequests[0]({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ processed: 0 })
+    });
+    for (let attempt = 0; attempt < 20 && fetchCalls < 2; attempt++) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
     assert.equal(fetchCalls, 2);
-    assert.equal(loggedTimeouts, 2);
+    pendingRequests[1]({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ processed: 0 })
+    });
+    await Promise.all([heartbeatPass, pollPass]);
+    assert.equal(loggedErrors, 0);
   } finally {
     global.fetch = originalFetch;
-    global.setTimeout = originalSetTimeout;
     console.error = originalConsoleError;
   }
 });
 
-test("default-timeout upload poll errors release the worker lock", async () => {
+test("default request timeout retries serially until the worker responds", async () => {
   const originalFetch = global.fetch;
   const originalSetTimeout = global.setTimeout;
-  const originalConsoleError = console.error;
   let timeoutDelay;
   let fetchCalls = 0;
-  let loggedTimeouts = 0;
   global.setTimeout = (callback, delay, ...args) => {
     if (delay === serverModule.WORKER_REQUEST_TIMEOUT_MS) {
       timeoutDelay = delay;
-      return originalSetTimeout(callback, 1, ...args);
+      return originalSetTimeout(callback, fetchCalls === 0 ? 1 : delay, ...args);
     }
     return originalSetTimeout(callback, delay, ...args);
   };
   global.fetch = (_url, options) => {
     fetchCalls++;
-    return new Promise((resolve, reject) => {
-      if (options.signal.aborted) {
-        reject(options.signal.reason);
-        return;
-      }
-      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    if (fetchCalls === 1) {
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ processed: 0 })
     });
-  };
-  console.error = (...args) => {
-    if (args[0] === "[WORKER ERROR] Background loop failed:") loggedTimeouts++;
   };
 
   try {
     await serverModule.runUploadQueuePoll();
-    await serverModule.runUploadQueuePoll();
     assert.equal(timeoutDelay, serverModule.WORKER_REQUEST_TIMEOUT_MS);
     assert.equal(fetchCalls, 2);
-    assert.equal(loggedTimeouts, 2);
   } finally {
     global.fetch = originalFetch;
     global.setTimeout = originalSetTimeout;
-    console.error = originalConsoleError;
   }
 });
 
