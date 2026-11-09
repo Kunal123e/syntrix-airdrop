@@ -6,6 +6,7 @@
 
 const express = require("express");
 const crypto = require("crypto");
+const { getUserStoragePathSegment } = require("../storagePaths");
 const router = express.Router();
 
 /**
@@ -35,6 +36,7 @@ router.post("/", async (req, res) => {
     }
 
     const sanitizedEmail = userEmail.trim().toLowerCase();
+    const storageUserSegment = getUserStoragePathSegment(sanitizedEmail);
     const jobResults = [];
     const validJobs = [];
 
@@ -131,7 +133,7 @@ router.post("/", async (req, res) => {
       } else {
         safeFileName = fileName.replace(/[^a-zA-Z0-9\-_]/g, "_") + ".jpeg";
       }
-      const storagePath = `queue/${sanitizedEmail}/${Date.now()}_${i}_${safeFileName}`;
+      const storagePath = `queue/${storageUserSegment}/${Date.now()}_${i}_${safeFileName}`;
 
       const { error: uploadErr } = await supabase.storage
         .from("verified_assets")
@@ -271,4 +273,3 @@ router.post("/", async (req, res) => {
 });
 
 module.exports = router;
-

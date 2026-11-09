@@ -266,7 +266,7 @@ test("process-queue preserves a failed upload record when its storage asset is m
   const failureUpdate = updates.find(update => update.status === "FAILED");
   assert.ok(failureUpdate);
   assert.equal(failureUpdate.error_code, "ASSET_NOT_FOUND");
-  assert.match(failureUpdate.reason, /Storage object not found/);
+  assert.match(failureUpdate.reason, /HTTP 404: Storage object does not exist/);
   assert.ok(Number.isFinite(Date.parse(failureUpdate.processed_at)));
   assert.equal(failureUpdate.retry_count, 1);
   assert.equal(failureUpdate.assigned_key, null);
@@ -518,6 +518,7 @@ test("worker HTTP errors cancel response bodies and preserve status", async () =
 test("overlapping worker triggers coalesce and preserve a retrigger during each active pass", async () => {
   const originalFetch = global.fetch;
   const pendingRequests = [];
+  const requestUrls = [];
   let fetchCalls = 0;
   let canceledBodies = 0;
 
@@ -532,8 +533,9 @@ test("overlapping worker triggers coalesce and preserve a retrigger during each 
     };
   }
 
-  global.fetch = () => new Promise(resolve => {
+  global.fetch = url => new Promise(resolve => {
     fetchCalls++;
+    requestUrls.push(url);
     pendingRequests.push(resolve);
   });
 
@@ -559,6 +561,7 @@ test("overlapping worker triggers coalesce and preserve a retrigger during each 
 
     const responses = await Promise.all(requests);
     assert.equal(fetchCalls, 3, "concurrent triggers coalesce to one follow-up per active pass");
+    assert.ok(requestUrls.every(url => /^http:\/\/127\.0\.0\.1:\d+\/api\/process-queue$/.test(url)));
     assert.equal(canceledBodies, 2, "failed and superseded responses are drained");
     assert.ok(responses.every(response => response.status === 200));
     assert.notEqual(responses[0], responses[1], "each caller receives an independent response clone");

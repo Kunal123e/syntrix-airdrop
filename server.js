@@ -13,6 +13,7 @@ const {
   safeStringEqual,
   verifySessionToken
 } = require("./sessionAuth");
+const { getUserStoragePathSegment } = require("./storagePaths");
 
 // XP SYSTEM IMPORT
 const { awardXP, getXPProfile, calculateFinalTaskReward } = require("./xpengine");
@@ -959,7 +960,8 @@ app.post("/api/upload-task", async (req, res) => {
 
     // DIVERSIFIED STORAGE PATH: Isolate selfies from documents
     const folderCategory = taskType === 'selfie' ? 'selfies' : 'documents';
-    const storagePath = `pending/${sanitizedEmail}/${folderCategory}/${Date.now()}_${safeFileName}`;
+    const storageUserSegment = getUserStoragePathSegment(sanitizedEmail);
+    const storagePath = `pending/${storageUserSegment}/${folderCategory}/${Date.now()}_${safeFileName}`;
     
     const { error: uploadError } = await supabase.storage
       .from("verified_assets")

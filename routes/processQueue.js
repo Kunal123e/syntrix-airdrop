@@ -189,23 +189,37 @@ function resolveKeyValue(keyName) {
 // =====================================================================
 // HELPER: Extract relative bucket path from a Supabase public URL
 // =====================================================================
-function getBucketPathFromUrl(url) {
+function getBucketPathFromUrl(url, expectedFileName) {
   if (!url) return null;
-  var marker = "/verified_assets/";
-  var idx = url.indexOf(marker);
-  if (idx === -1) {
-    marker = "/storage/v1/object/public/verified_assets/";
-    idx = url.indexOf(marker);
-    if (idx === -1) return null;
-  }
-  var path = url.substring(idx + marker.length);
-  var qIdx = path.indexOf("?");
-  if (qIdx !== -1) path = path.substring(0, qIdx);
+  var parsedUrl;
   try {
-    return decodeURIComponent(path);
+    parsedUrl = new URL(url);
+  } catch (e) {
+    return null;
+  }
+  var marker = "/verified_assets/";
+  var idx = parsedUrl.pathname.lastIndexOf(marker);
+  if (idx === -1) return null;
+  var path = parsedUrl.pathname.substring(idx + marker.length);
+  try {
+    var decodedPath = decodeURIComponent(path);
+    if (expectedFileName) {
+      var fullPath = decodeURIComponent(path + parsedUrl.search + parsedUrl.hash);
+      if (fullPath.endsWith("/" + expectedFileName)) return fullPath;
+    }
+    return decodedPath;
   } catch (e) {
     return path;
   }
+}
+
+function getPublicStorageUrl(url, relativeFilePath) {
+  var marker = "/verified_assets/";
+  var markerIndex = url.indexOf(marker);
+  if (markerIndex === -1) return url;
+  var prefix = url.substring(0, markerIndex + marker.length);
+  var encodedPath = relativeFilePath.split("/").map(encodeURIComponent).join("/");
+  return prefix + encodedPath;
 }
 
 function withTimeout(promise, ms, opName) {
@@ -222,6 +236,73 @@ function withTimeout(promise, ms, opName) {
   });
 }
 
+async function downloadUploadImage(supabase, storageUrl, relativeFilePath) {
+  var imageBuffer = null;
+
+  if (relativeFilePath) {
+    try {
+      var { data: downloadedBlob, error: downloadErr } = await withTimeout(
+        supabase.storage.from("verified_assets").download(relativeFilePath),
+        15000,
+        "Storage SDK download"
+      );
+      if (!downloadErr && downloadedBlob) {
+        var arrayBuf = await withTimeout(downloadedBlob.arrayBuffer(), 10000, "Storage blob arrayBuffer");
+        imageBuffer = Buffer.from(arrayBuf);
+      } else if (downloadErr) {
+        var isConfirmedMissing = (downloadErr.message && downloadErr.message.includes("Object not found")) || downloadErr.statusCode === 404 || downloadErr.statusCode === "404";
+        if (isConfirmedMissing) {
+          console.warn("[QUEUE] Storage SDK reported a missing object; trying its public URL:", relativeFilePath);
+        } else {
+          console.warn("[QUEUE] Supabase SDK download transient error for " + relativeFilePath + ":", downloadErr.message);
+        }
+      }
+    } catch (sdkErr) {
+      if (sdkErr.isTimeout) console.warn("[QUEUE] Storage SDK download timed out for " + relativeFilePath);
+      else console.warn("[QUEUE] Supabase SDK download exception:", sdkErr.message);
+    }
+  }
+
+  if (!imageBuffer) {
+    try {
+      var safeUrl = relativeFilePath
+        ? getPublicStorageUrl(storageUrl, relativeFilePath)
+        : storageUrl;
+      var fetchController = new AbortController();
+      var fetchTimeoutId = setTimeout(() => fetchController.abort(), 15000);
+      var imageResponse;
+      try {
+        imageResponse = await fetch(safeUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "image/*,*/*;q=0.8"
+          },
+          signal: fetchController.signal
+        });
+      } finally {
+        clearTimeout(fetchTimeoutId);
+      }
+
+      if (imageResponse.ok) {
+        var arrayBuffer = await withTimeout(imageResponse.arrayBuffer(), 10000, "HTTP response arrayBuffer");
+        imageBuffer = Buffer.from(arrayBuffer);
+      } else if (imageResponse.status === 404) {
+        var fatalErr = new Error("HTTP 404: Storage object does not exist");
+        fatalErr.isFatal = true;
+        fatalErr.errorCode = "ASSET_NOT_FOUND";
+        throw fatalErr;
+      } else {
+        throw new Error("HTTP " + imageResponse.status + " on storage fetch");
+      }
+    } catch (httpErr) {
+      if (httpErr.isFatal) throw httpErr;
+      throw new Error("Failed to fetch image from storage: " + httpErr.message);
+    }
+  }
+
+  return imageBuffer;
+}
+
 // =====================================================================
 // HELPER: Process a single upload_job through the AI pipeline
 // =====================================================================
@@ -232,7 +313,7 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
   }
 
   var aiClient = new GoogleGenAI({ apiKey: apiKeyValue });
-  var relativeFilePath = getBucketPathFromUrl(job.storage_url);
+  var relativeFilePath = getBucketPathFromUrl(job.storage_url, job.file_name);
   var isSelfie = job.task_type === "selfie";
 
   // ---- ATOMIC CLAIMING (PHASE 2) ----
@@ -314,76 +395,11 @@ async function processUploadJob(supabase, job, keyName, xpFunctions) {
 
   // ---- 1. Fetch image from storage ----
   // ---- 1. Fetch image from storage (Dual Strategy: Authenticated SDK download + fallback HTTP fetch) ----
-  var imageBuffer = null;
-
-  // Strategy A: Direct authenticated download via Supabase Service Role SDK with strict 15s timeout
-  if (relativeFilePath) {
-    try {
-      var { data: downloadedBlob, error: downloadErr } = await withTimeout(
-        supabase.storage.from("verified_assets").download(relativeFilePath),
-        15000,
-        "Storage SDK download"
-      );
-      if (!downloadErr && downloadedBlob) {
-        var arrayBuf = await withTimeout(downloadedBlob.arrayBuffer(), 10000, "Storage blob arrayBuffer");
-        imageBuffer = Buffer.from(arrayBuf);
-      } else if (downloadErr) {
-        // Strictly classify confirmed missing asset vs transient error
-        var isConfirmedMissing = (downloadErr.message && downloadErr.message.includes("Object not found")) || downloadErr.statusCode === 404 || downloadErr.statusCode === "404";
-        if (isConfirmedMissing) {
-          if (typeof leaseHeartbeat !== "undefined") clearInterval(leaseHeartbeat);
-          var fatalErr = new Error("Storage object not found in bucket (permanent missing asset)");
-          fatalErr.isFatal = true;
-          fatalErr.errorCode = "ASSET_NOT_FOUND";
-          throw fatalErr;
-        }
-        console.warn("[QUEUE] Supabase SDK download transient error for " + relativeFilePath + ":", downloadErr.message);
-      }
-    } catch (sdkErr) {
-      if (sdkErr.isFatal) throw sdkErr;
-      if (sdkErr.isTimeout) console.warn("[QUEUE] Storage SDK download timed out for " + relativeFilePath);
-      else console.warn("[QUEUE] Supabase SDK download exception:", sdkErr.message);
-    }
-  }
-
-  // Strategy B: Fallback HTTP Fetch with strict 15s AbortController timeout
-  if (!imageBuffer) {
-    try {
-      var safeUrl = encodeURI(decodeURI(job.storage_url));
-      var fetchController = new AbortController();
-      var fetchTimeoutId = setTimeout(() => fetchController.abort(), 15000);
-      var imageResponse;
-      try {
-        imageResponse = await fetch(safeUrl, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "image/*,*/*;q=0.8"
-          },
-          signal: fetchController.signal
-        });
-      } finally {
-        clearTimeout(fetchTimeoutId);
-      }
-
-      if (imageResponse.ok) {
-        var arrayBuffer = await withTimeout(imageResponse.arrayBuffer(), 10000, "HTTP response arrayBuffer");
-        imageBuffer = Buffer.from(arrayBuffer);
-      } else if (imageResponse.status === 404) {
-        if (typeof leaseHeartbeat !== "undefined") clearInterval(leaseHeartbeat);
-        var fatalErr = new Error("HTTP 404: Storage object does not exist");
-        fatalErr.isFatal = true;
-        fatalErr.errorCode = "ASSET_NOT_FOUND";
-        throw fatalErr;
-      } else {
-        // HTTP 400 or 5xx is treated as transient/retryable (not immediately fatal)
-        throw new Error("HTTP " + imageResponse.status + " on storage fetch");
-      }
-    } catch (httpErr) {
-      if (httpErr.isFatal) throw httpErr;
+  var imageBuffer = await downloadUploadImage(supabase, job.storage_url, relativeFilePath)
+    .catch(function(downloadError) {
       if (typeof leaseHeartbeat !== "undefined") clearInterval(leaseHeartbeat);
-      throw new Error("Failed to fetch image from storage: " + httpErr.message);
-    }
-  }
+      throw downloadError;
+    });
 
   var base64Data = imageBuffer.toString("base64");
 
@@ -963,7 +979,7 @@ router.post("/", async (req, res) => {
           // ---- General error: Catch silently and retry (Phase 2) ----
           console.error("[QUEUE] Job " + job.id + " failed:", jobErr.message);
 
-          var filePath = getBucketPathFromUrl(job.storage_url);
+          var filePath = getBucketPathFromUrl(job.storage_url, job.file_name);
           var isFatal = jobErr.isKeyError || jobErr.isFatal || false; // Don't retry if missing key or missing file
           
           var newRetryCount = (job.retry_count || 0) + 1;
@@ -1063,11 +1079,9 @@ module.exports = router;
 module.exports.buildDocumentQualityRules = buildDocumentQualityRules;
 module.exports.normalizeDocumentQualityScore = normalizeDocumentQualityScore;
 module.exports.calculateDocumentReward = calculateDocumentReward;
-
-
-
-
-
+module.exports.getBucketPathFromUrl = getBucketPathFromUrl;
+module.exports.getPublicStorageUrl = getPublicStorageUrl;
+module.exports.downloadUploadImage = downloadUploadImage;
 
 
 
