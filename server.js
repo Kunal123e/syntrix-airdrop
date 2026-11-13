@@ -13,6 +13,31 @@ const {
   safeStringEqual,
   verifySessionToken
 } = require("./sessionAuth");
+const {
+  createOtpCode,
+  createOtpDigest,
+  createOtpRecord,
+  getOtpHmacSecret,
+  safeOtpDigestEqual
+} = require("./otpAuth");
+const {
+  USER_SESSION_TTL_SECONDS,
+  USER_SESSION_PURPOSE,
+  USER_SESSION_AUDIENCE,
+  activateOtpWithRpc,
+  applyRateLimitResponse,
+  assertSessionEmail,
+  createUserSessionToken,
+  getSessionHash,
+  getUserSessionHmacSecret,
+  isPhase2RpcEnabled,
+  issueOtpWithRpc,
+  invalidateOtpWithRpc,
+  normalizeEmail,
+  requireUserSession,
+  revokeUserSession,
+  verifyOtpWithRpc
+} = require("./phase2Auth");
 const { getUserStoragePathSegment } = require("./storagePaths");
 
 // XP SYSTEM IMPORT
@@ -68,18 +93,20 @@ const supabase = createClient(
 // ================= ASYNC UPLOAD QUEUE ROUTES (Phase 2 + Phase 3) =================
 app.locals.supabase = supabase;
 app.locals.sendEmailHTTP = sendEmailHTTP;
+const userSessionMiddleware = requireUserSession(supabase);
 const uploadBatchRouter = require("./routes/uploadBatch");
 const checkBatchRouter = require("./routes/checkBatch");
 const processQueueRouter = require("./routes/processQueue");
-app.use("/api/uploads/batch", uploadBatchRouter);
-app.use("/api/uploads/batch", checkBatchRouter);
+app.use("/api/uploads/batch", userSessionMiddleware, uploadBatchRouter);
+app.use("/api/uploads/batch", userSessionMiddleware, checkBatchRouter);
 app.use("/api/process-queue", processQueueRouter);
 
 // GET /api/history
-app.get('/api/history', async (req, res) => {
+app.get('/api/history', userSessionMiddleware, async (req, res) => {
   try {
     const { email } = req.query;
     if (!email) return res.status(400).json({ success: false, error: "Email is required" });
+    if (!assertSessionEmail(req, email)) return res.status(403).json({ success: false, error: "Forbidden." });
     
     const { data, error } = await supabase
       .from("upload_jobs")
@@ -199,28 +226,34 @@ async function sendRewardNotification(referrerEmail, rewardAmount, claimToken) {
 }
 
 // ================= OTP MEMORY STORE =================
-const otpStorage = {};
+const otpStorage = new Map();
 
 setInterval(() => {
   const now = Date.now();
-  for (const email in otpStorage) {
-    if (otpStorage[email].expires < now) delete otpStorage[email];
+  for (const [email, record] of otpStorage) {
+    if (record.expires <= now) otpStorage.delete(email);
   }
 }, 10 * 60 * 1000);
 
 const otpCooldowns = new Map();
+const OTP_VALIDITY_MS = 5 * 60 * 1000;
 
 // ================= OTP ROUTES =================
 app.post("/api/send-otp", async (req, res) => {
+  const otpSecret = getOtpHmacSecret();
+  if (!otpSecret) {
+    return res.status(503).json({ error: "OTP authentication is not configured." });
+  }
+
   const { email } = req.body;
-  if (!email) return res.status(400).json({ error: "Email required." });
+  if (typeof email !== "string" || !email) return res.status(400).json({ error: "Email required." });
 
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
     return res.status(400).json({ error: "Invalid email format." });
   }
 
-  const sanitizedEmail = email.trim().toLowerCase();
+  const sanitizedEmail = normalizeEmail(email);
 
   // Rate Limiting: 60-second cooldown per email
   if (otpCooldowns.has(sanitizedEmail)) {
@@ -230,12 +263,31 @@ app.post("/api/send-otp", async (req, res) => {
     }
   }
 
-  const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+  const otpCode = createOtpCode();
 
-  otpStorage[sanitizedEmail] = {
-    otp: otpCode,
-    expires: Date.now() + 10 * 60 * 1000
-  };
+  const otpExpiresAt = Date.now() + OTP_VALIDITY_MS;
+  const otpDigest = createOtpDigest(sanitizedEmail, otpCode, otpSecret);
+
+  if (isPhase2RpcEnabled()) {
+    try {
+      const result = await issueOtpWithRpc(supabase, sanitizedEmail, req, otpDigest, otpExpiresAt);
+      if (!result || result.status === "ip_configuration_error") {
+        return res.status(503).json({ error: "OTP rate limiting is not configured." });
+      }
+      if (result.status === "rate_limited") return applyRateLimitResponse(res, result);
+      if (result.status !== "pending" || !result.challenge_id) {
+        return res.status(503).json({ error: "OTP service is unavailable." });
+      }
+      var rpcChallengeId = result.challenge_id;
+    } catch (error) {
+      return res.status(503).json({ error: "OTP service is unavailable." });
+    }
+  } else {
+    otpStorage.set(
+      sanitizedEmail,
+      createOtpRecord(sanitizedEmail, otpCode, otpExpiresAt, otpSecret)
+    );
+  }
 
   otpCooldowns.set(sanitizedEmail, Date.now());
 
@@ -246,33 +298,87 @@ app.post("/api/send-otp", async (req, res) => {
       <div style="background-color: #f8fafc; padding: 15px; margin: 20px 0; text-align: center; border-radius: 6px;">
         <span style="font-size: 28px; font-weight: bold; letter-spacing: 5px; color: #1e293b;">${otpCode}</span>
       </div>
-      <p style="color: #64748b; font-size: 12px;">This code will expire in 10 minutes.</p>
+      <p style="color: #64748b; font-size: 12px;">This code will expire in 5 minutes.</p>
     </div>
   `;
 
   try {
-    await sendEmailHTTP(sanitizedEmail, `Your Syntrix Verification Code: ${otpCode}`, htmlBody);
+    await sendEmailHTTP(sanitizedEmail, "Your Syntrix Verification Code", htmlBody);
+    if (isPhase2RpcEnabled()) {
+      const activated = await activateOtpWithRpc(supabase, rpcChallengeId);
+      if (!activated || activated.status !== "activated") {
+        try { await invalidateOtpWithRpc(supabase, rpcChallengeId); } catch {}
+        return res.status(503).json({ error: "OTP service is unavailable." });
+      }
+    }
     return res.json({ success: true, message: "OTP Sent" });
   } catch (err) {
+    if (isPhase2RpcEnabled() && rpcChallengeId) {
+      try { await invalidateOtpWithRpc(supabase, rpcChallengeId); } catch {}
+    }
     return res.status(500).json({ error: "Failed to deliver email via HTTP API." });
   }
 });
 
 app.post("/api/verify-otp", async (req, res) => {
+  const otpSecret = getOtpHmacSecret();
+  if (!otpSecret) {
+    return res.status(503).json({ error: "OTP authentication is not configured." });
+  }
+
   const { email, otp, referral_code } = req.body;
-  if (!email || !otp) return res.status(400).json({ error: "Email and OTP required." });
+  if (typeof email !== "string" || typeof otp !== "string" || !email || !otp) {
+    return res.status(400).json({ error: "Email and OTP required." });
+  }
 
-  const sanitizedEmail = email.trim().toLowerCase();
-  const record = otpStorage[sanitizedEmail];
+  const sanitizedEmail = normalizeEmail(email);
+  const submittedOtp = otp.trim();
+  if (!/^\d{6}$/.test(submittedOtp)) return res.status(400).json({ error: "Invalid OTP code." });
 
-  if (!record) return res.status(400).json({ error: "OTP expired or not requested. Please send a new code." });
-  if (record.expires < Date.now()) {
-    delete otpStorage[sanitizedEmail];
+  let sessionToken;
+  let rpcResult;
+  if (isPhase2RpcEnabled()) {
+    const sessionSecret = getUserSessionHmacSecret();
+    if (!sessionSecret) {
+      return res.status(503).json({ error: "Authenticated session service is not configured." });
+    }
+    sessionToken = createUserSessionToken();
+    const sessionHash = getSessionHash(sessionToken);
+    try {
+      rpcResult = await verifyOtpWithRpc(
+        supabase,
+        sanitizedEmail,
+        req,
+        createOtpDigest(sanitizedEmail, submittedOtp, otpSecret),
+        sessionHash,
+        Date.now() + USER_SESSION_TTL_SECONDS * 1000
+      );
+    } catch (error) {
+      return res.status(503).json({ error: "OTP service is unavailable." });
+    }
+    if (!rpcResult || rpcResult.status === "ip_configuration_error") {
+      return res.status(503).json({ error: "OTP rate limiting is not configured." });
+    }
+    if (rpcResult.status === "rate_limited") return applyRateLimitResponse(res, rpcResult);
+    if (rpcResult.status !== "accepted") {
+      return res.status(400).json({ error: "Invalid OTP code." });
+    }
+  }
+
+  const record = isPhase2RpcEnabled() ? null : otpStorage.get(sanitizedEmail);
+
+  if (!isPhase2RpcEnabled() && !record) {
+    return res.status(400).json({ error: "OTP expired or not requested. Please send a new code." });
+  }
+  if (!isPhase2RpcEnabled() && record.expires <= Date.now()) {
+    otpStorage.delete(sanitizedEmail);
     return res.status(400).json({ error: "OTP has expired." });
   }
-  if (record.otp !== otp.trim()) return res.status(400).json({ error: "Invalid OTP code." });
+  if (!isPhase2RpcEnabled() && !safeOtpDigestEqual(record.digest, createOtpDigest(sanitizedEmail, submittedOtp, otpSecret))) {
+    return res.status(400).json({ error: "Invalid OTP code." });
+  }
 
-  delete otpStorage[sanitizedEmail];
+  if (!isPhase2RpcEnabled()) otpStorage.delete(sanitizedEmail);
 
   // ---- Normalize & Save Referral Code ----
   let normalizedRef = null;
@@ -304,7 +410,29 @@ app.post("/api/verify-otp", async (req, res) => {
     // Non-fatal: don't block OTP success
   }
 
-  return res.json({ success: true });
+  const response = { success: true };
+  if (sessionToken) {
+    response.sessionToken = sessionToken;
+    response.expiresIn = USER_SESSION_TTL_SECONDS;
+  }
+  return res.json(response);
+});
+
+app.post("/api/logout", async (req, res) => {
+  if (!isPhase2RpcEnabled() || !getUserSessionHmacSecret()) {
+    return res.status(503).json({ success: false, error: "Authenticated session service is not configured." });
+  }
+  const match = /^Bearer\s+([A-Za-z0-9_-]{20,256})$/.exec(req.headers.authorization || "");
+  if (!match) return res.status(401).json({ success: false, error: "Authenticated session required." });
+  try {
+    const result = await revokeUserSession(supabase, match[1]);
+    if (!result || result.status !== "revoked") {
+      return res.status(503).json({ success: false, error: "Authenticated session service unavailable." });
+    }
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(503).json({ success: false, error: "Authenticated session service unavailable." });
+  }
 });
 
 // ================= TEST & UTILITY ROUTES =================
@@ -312,7 +440,7 @@ app.get("/", (req, res) => {
   res.json({ success: true, message: "Syntrix Network API Engine Active" });
 });
 
-app.post("/api/test-email", async (req, res) => {
+app.post("/api/test-email", verifyAdminAccess, async (req, res) => {
   const { toEmail } = req.body;
   try {
     await sendEmailHTTP(toEmail, "HTTP API TEST", "<p>API connection successful.</p>");
@@ -351,7 +479,7 @@ app.get("/r/:refCode", (req, res) => {
 });
 
 // ================= SURVEY INGESTION SYSTEM =================
-app.post("/api/submit-survey", async (req, res) => {
+app.post("/api/submit-survey", userSessionMiddleware, async (req, res) => {
   try {
     const { email, referredBy, survey_data, startTime, submissionTime, persona_badge, duration_seconds, selfie_verified, selfie_consent, selfie_asset_url } = req.body;
 
@@ -368,6 +496,7 @@ app.post("/api/submit-survey", async (req, res) => {
 
     if (!email) return res.status(400).json({ error: "Email identifier required" });
     const sanitizedEmail = email.trim().toLowerCase();
+    if (!assertSessionEmail(req, sanitizedEmail)) return res.status(403).json({ error: "Forbidden." });
     const generatedReferralCode = generateReferralCode(sanitizedEmail);
 
     const { data: existingEmail } = await supabase
@@ -495,9 +624,10 @@ app.post("/api/submit-survey", async (req, res) => {
 });
 
 // ================= PROFILE & DASHBOARD LOOKUPS =================
-app.get("/api/user-status", async (req, res) => {
+app.get("/api/user-status", userSessionMiddleware, async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).json({ error: "Email parameter required" });
+  if (!assertSessionEmail(req, email)) return res.status(403).json({ error: "Forbidden." });
 
   try {
     const sanitizedEmail = email.trim().toLowerCase();
@@ -926,9 +1056,10 @@ function triggerUploadQueueWorker(signal) {
 }
 
 // ================= UI POLLING ENDPOINT =================
-app.get("/api/check-submission", async (req, res) => {
+app.get("/api/check-submission", userSessionMiddleware, async (req, res) => {
   const email = req.query.email || req.body?.email || req.query.userEmail;
   if (!email) return res.status(400).json({ error: "Email required" });
+  if (!assertSessionEmail(req, email)) return res.status(403).json({ error: "Forbidden." });
 
   try {
     const { data, error } = await supabase
@@ -954,7 +1085,7 @@ function getBucketFilePathFromUrl(publicUrl) {
 }
 
 // ================= BACKEND-INTERCEPT BUCKET UPLOAD =================
-app.post("/api/upload-task", async (req, res) => {
+app.post("/api/upload-task", userSessionMiddleware, async (req, res) => {
   const { email, userEmail, taskType, fileName, imageBase64, contentTags, assignedTask } = req.body;
   const actualEmail = userEmail || email;
 
@@ -963,6 +1094,7 @@ app.post("/api/upload-task", async (req, res) => {
   }
 
   const sanitizedEmail = actualEmail.trim().toLowerCase();
+  if (!assertSessionEmail(req, sanitizedEmail)) return res.status(403).json({ error: "Forbidden." });
   const lastDot = fileName.lastIndexOf(".");
   let safeFileName;
   if (lastDot !== -1) {
@@ -1104,9 +1236,10 @@ app.post("/api/admin/queue/wake", verifyAdminAccess, async (req, res) => {
 });
 
 // ================= XP PROFILE =================
-app.get("/api/xp-profile", async (req, res) => {
+app.get("/api/xp-profile", userSessionMiddleware, async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).json({ error: "Email parameter required" });
+  if (!assertSessionEmail(req, email)) return res.status(403).json({ error: "Forbidden." });
   try {
     const profile = await getXPProfile(supabase, email);
     return res.json({ success: true, profile });

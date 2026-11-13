@@ -15,12 +15,54 @@ const {
   verifySessionToken
 } = require("../sessionAuth");
 const processQueueRouter = require("../routes/processQueue");
+const {
+  createOtpCode,
+  createOtpDigest,
+  createOtpRecord,
+  getOtpHmacSecret,
+  safeOtpDigestEqual
+} = require("../otpAuth");
 
 const previousAdminSecret = process.env.ADMIN_SECRET_KEY;
 const previousSessionSecret = process.env.ADMIN_SESSION_SECRET;
 let serverModule;
 process.env.ADMIN_SECRET_KEY = "admin-password-for-tests";
 process.env.ADMIN_SESSION_SECRET = "a".repeat(64);
+
+test("OTP codes use six decimal digits and stored records contain only email-bound HMAC digests", () => {
+  const secret = "otp-hmac-secret-for-tests-".padEnd(64, "x");
+  const code = createOtpCode();
+  assert.match(code, /^\d{6}$/);
+
+  const record = createOtpRecord("user@example.test", code, Date.now() + 600000, secret);
+  assert.deepEqual(Object.keys(record).sort(), ["digest", "expires"]);
+  assert.ok(record.expires > Date.now());
+  assert.equal(record.digest, createOtpDigest("user@example.test", code, secret));
+  assert.equal(safeOtpDigestEqual(record.digest, createOtpDigest("user@example.test", code, secret)), true);
+  assert.equal(safeOtpDigestEqual(record.digest, createOtpDigest("other@example.test", code, secret)), false);
+  assert.equal(safeOtpDigestEqual(record.digest, createOtpDigest("user@example.test", "000000", secret)), false);
+  assert.equal(safeOtpDigestEqual(record.digest, "not-a-digest"), false);
+});
+
+test("OTP HMAC configuration requires a distinct secret of at least 32 bytes", () => {
+  const originalOtpSecret = process.env.OTP_HMAC_SECRET;
+
+  try {
+    delete process.env.OTP_HMAC_SECRET;
+    assert.equal(getOtpHmacSecret(), null);
+    process.env.OTP_HMAC_SECRET = "short";
+    assert.equal(getOtpHmacSecret(), null);
+    process.env.OTP_HMAC_SECRET = process.env.ADMIN_SECRET_KEY;
+    assert.equal(getOtpHmacSecret(), null);
+    process.env.OTP_HMAC_SECRET = process.env.ADMIN_SESSION_SECRET;
+    assert.equal(getOtpHmacSecret(), null);
+    process.env.OTP_HMAC_SECRET = "b".repeat(64);
+    assert.equal(getOtpHmacSecret(), process.env.OTP_HMAC_SECRET);
+  } finally {
+    if (originalOtpSecret === undefined) delete process.env.OTP_HMAC_SECRET;
+    else process.env.OTP_HMAC_SECRET = originalOtpSecret;
+  }
+});
 
 function signClaims(claims) {
   const payload = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
@@ -279,6 +321,8 @@ test("claim routes fail closed and internal admin wake uses a signed worker sess
     port: process.env.PORT,
     supabaseUrl: process.env.SUPABASE_URL,
     supabaseRole: process.env.SUPABASE_SERVICE_ROLE,
+    brevoApiKey: process.env.BREVO_API_KEY,
+    otpHmacSecret: process.env.OTP_HMAC_SECRET,
     rpcUrl: process.env.RPC_URL,
     privateKey: process.env.PRIVATE_KEY,
     tokenAddress: process.env.TOKEN_ADDRESS
@@ -342,6 +386,7 @@ test("claim routes fail closed and internal admin wake uses a signed worker sess
   process.env.PORT = String(port);
   process.env.SUPABASE_URL = "https://supabase.invalid";
   process.env.SUPABASE_SERVICE_ROLE = "test-service-role";
+  process.env.BREVO_API_KEY = "test-brevo-api-key";
   delete process.env.RPC_URL;
   delete process.env.PRIVATE_KEY;
   delete process.env.TOKEN_ADDRESS;
@@ -366,6 +411,8 @@ test("claim routes fail closed and internal admin wake uses a signed worker sess
     for (const [name, value] of [
       ["SUPABASE_URL", originalEnv.supabaseUrl],
       ["SUPABASE_SERVICE_ROLE", originalEnv.supabaseRole],
+      ["BREVO_API_KEY", originalEnv.brevoApiKey],
+      ["OTP_HMAC_SECRET", originalEnv.otpHmacSecret],
       ["RPC_URL", originalEnv.rpcUrl],
       ["PRIVATE_KEY", originalEnv.privateKey],
       ["TOKEN_ADDRESS", originalEnv.tokenAddress]
@@ -406,6 +453,28 @@ test("claim routes fail closed and internal admin wake uses a signed worker sess
   const { token } = await loginResponse.json();
   assert.equal(verifySessionToken(token, "admin", ADMIN_PURPOSE), true);
 
+  delete process.env.OTP_HMAC_SECRET;
+  const unconfiguredOtpResponse = await fetch(`${baseUrl}/api/send-otp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "otp-user@example.test" })
+  });
+  assert.equal(unconfiguredOtpResponse.status, 503);
+
+  const unconfiguredVerifyOtpResponse = await fetch(`${baseUrl}/api/verify-otp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "otp-user@example.test", otp: "123456" })
+  });
+  assert.equal(unconfiguredVerifyOtpResponse.status, 503);
+
+  const anonymousTestEmailResponse = await fetch(`${baseUrl}/api/test-email`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ toEmail: "recipient@example.invalid" })
+  });
+  assert.equal(anonymousTestEmailResponse.status, 403);
+
   const anonymousWakeResponse = await fetch(`${baseUrl}/api/public-wake`, { method: "POST" });
   assert.equal(anonymousWakeResponse.status, 503);
   assert.equal(rpcCalls, 0);
@@ -430,12 +499,74 @@ test("claim routes fail closed and internal admin wake uses a signed worker sess
   const uploadWakeCancelled = new Promise(resolve => {
     resolveUploadWakeCancelled = resolve;
   });
-  global.fetch = async () => ({
-    ok: true,
-    status: 200,
-    body: { cancel: async () => resolveUploadWakeCancelled() }
-  });
+  const otpHmacSecretBeforeRequests = process.env.OTP_HMAC_SECRET;
+  let testEmailRequest;
+  global.fetch = async (url, options) => {
+    if (url === "https://api.brevo.com/v3/smtp/email") {
+      const emailBody = JSON.parse(options.body);
+      if (emailBody.subject === "Your Syntrix Verification Code") {
+        testEmailRequest = { url, options, emailBody };
+        return { ok: true, json: async () => ({ messageId: "test-otp-message" }) };
+      }
+      testEmailRequest = { url, options };
+      return { ok: true, json: async () => ({ messageId: "test-message" }) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      body: { cancel: async () => resolveUploadWakeCancelled() }
+    };
+  };
   try {
+    process.env.OTP_HMAC_SECRET = "b".repeat(64);
+    const sendOtpResponse = await nativeFetch(`${baseUrl}/api/send-otp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "otp-user@example.test" })
+    });
+    assert.equal(sendOtpResponse.status, 200);
+    assert.equal((await sendOtpResponse.json()).success, true);
+    assert.equal(testEmailRequest.emailBody.to[0].email, "otp-user@example.test");
+    assert.doesNotMatch(testEmailRequest.emailBody.subject, /\d{6}/);
+    assert.match(testEmailRequest.emailBody.htmlContent, /expire in 5 minutes/);
+    assert.doesNotMatch(testEmailRequest.emailBody.htmlContent, /expire in 10 minutes/);
+    const deliveredOtp = testEmailRequest.emailBody.htmlContent.match(/<span[^>]*>(\d{6})<\/span>/)[1];
+
+    const invalidOtpResponse = await nativeFetch(`${baseUrl}/api/verify-otp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "otp-user@example.test", otp: "000000" })
+    });
+    assert.equal(invalidOtpResponse.status, 400);
+
+    const verifyOtpResponse = await nativeFetch(`${baseUrl}/api/verify-otp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "otp-user@example.test", otp: deliveredOtp })
+    });
+    assert.equal(verifyOtpResponse.status, 200);
+    assert.equal((await verifyOtpResponse.json()).success, true);
+
+    const replayOtpResponse = await nativeFetch(`${baseUrl}/api/verify-otp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "otp-user@example.test", otp: deliveredOtp })
+    });
+    assert.equal(replayOtpResponse.status, 400);
+
+    const adminTestEmailResponse = await nativeFetch(`${baseUrl}/api/test-email`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-key": token
+      },
+      body: JSON.stringify({ toEmail: "recipient@example.invalid" })
+    });
+    assert.equal(adminTestEmailResponse.status, 200);
+    assert.equal((await adminTestEmailResponse.json()).success, true);
+    assert.equal(testEmailRequest.url, "https://api.brevo.com/v3/smtp/email");
+    assert.deepEqual(JSON.parse(testEmailRequest.options.body).to, [{ email: "recipient@example.invalid" }]);
+
     const uploadResponse = await nativeFetch(`${baseUrl}/api/upload-task`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -451,6 +582,8 @@ test("claim routes fail closed and internal admin wake uses a signed worker sess
     await uploadWakeCancelled;
   } finally {
     global.fetch = nativeFetch;
+    if (otpHmacSecretBeforeRequests === undefined) delete process.env.OTP_HMAC_SECRET;
+    else process.env.OTP_HMAC_SECRET = otpHmacSecretBeforeRequests;
   }
 });
 
