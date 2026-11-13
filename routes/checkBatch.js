@@ -4,6 +4,7 @@
 // =====================================================================
 
 const express = require("express");
+const { assertSessionEmail } = require("../phase2Auth");
 const router = express.Router();
 
 // GET /api/uploads/batch/:batchId/status
@@ -25,6 +26,9 @@ router.get("/:batchId/status", async (req, res) => {
 
     if (batchErr || !batch) {
       return res.status(404).json({ success: false, error: "Batch not found." });
+    }
+    if (!assertSessionEmail(req, batch.user_email)) {
+      return res.status(403).json({ success: false, error: "Forbidden." });
     }
 
     // ---- Fetch Jobs ----
@@ -85,6 +89,9 @@ router.get("/user/:email", async (req, res) => {
 
     if (!email) {
       return res.status(400).json({ success: false, error: "Missing email parameter." });
+    }
+    if (!assertSessionEmail(req, email)) {
+      return res.status(403).json({ success: false, error: "Forbidden." });
     }
 
     const { data: batches, error: batchErr } = await supabase

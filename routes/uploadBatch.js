@@ -7,6 +7,7 @@
 const express = require("express");
 const crypto = require("crypto");
 const { getUserStoragePathSegment } = require("../storagePaths");
+const { assertSessionEmail } = require("../phase2Auth");
 const router = express.Router();
 
 /**
@@ -26,6 +27,9 @@ router.post("/", async (req, res) => {
         success: false,
         error: "Missing required fields: userEmail (string), files (array of {taskType, fileName, imageBase64})"
       });
+    }
+    if (!assertSessionEmail(req, userEmail)) {
+      return res.status(403).json({ success: false, error: "Forbidden." });
     }
 
     if (files.length > 5) {
